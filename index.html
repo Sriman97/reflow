@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Reflow</title>
+<link rel="icon" href="icons/32.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#fbfaf7">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Reflow">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="pdf.min.js"></script>
+<style>
+:root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .07 0'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)'/%3E%3C/svg%3E"),url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='m'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.012' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .3 0 0 0 0 .2 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='600' height='600' filter='url(%23m)'/%3E%3C/svg%3E");--bg:#fbfaf7;--fg:#1f1d1a;--muted:#8a857c;--ui:#ffffffef;--line:#00000014;--accent:#c2410c;--ff:'Literata',Georgia,serif;--fs:19px;--lh:1.55;--ta:justify}
+body.sepia{--bg:#f4ecd8;--fg:#3b2f1e;--muted:#8b7b62;--ui:#efe5ccef;--line:#3b2f1e1f}
+body.paper{--bg:#e8e6df;--fg:#141414;--muted:#66645e;--ui:#e8e6dff4;--line:#0000002a;--accent:#2b2b2b}
+body.paper{background-image:var(--grain)}
+body.paper #content{color:#121212;text-shadow:0 0 .4px rgba(0,0,0,.6);-webkit-font-smoothing:antialiased}
+body.paper .fig canvas,body.paper #oCan{filter:grayscale(1) contrast(1.15);mix-blend-mode:multiply}
+body.paper .bar2{backdrop-filter:none;-webkit-backdrop-filter:none;background-image:var(--grain)}
+body.paper .sheet{background-image:var(--grain)}
+#flash{position:fixed;inset:0;background:#000;z-index:40;pointer-events:none;opacity:0}
+body.dark{--bg:#111;--fg:#d9d5cd;--muted:#77726a;--ui:#1c1c1cef;--line:#ffffff1c;--accent:#fb923c}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:Inter,system-ui,sans-serif;overflow:hidden;-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
+button,label.btn{font:500 14px Inter,system-ui,sans-serif;color:var(--fg);background:transparent;border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer}
+button.primary,label.primary{background:var(--accent);color:#fff;border:none}
+.hidden{display:none!important}
+/* library */
+#lib{position:fixed;inset:0;overflow:auto;padding:28px 20px 40px;max-width:640px;margin:0 auto}
+#lib h1{font:600 30px var(--ff);margin:8px 0 4px;letter-spacing:-.01em}
+#lib .tag{color:var(--muted);margin:0 0 22px;font-size:14px;line-height:1.5}
+#lib label.primary{display:block;text-align:center;padding:14px;font-size:16px;border-radius:14px}
+#books{margin-top:24px;display:flex;flex-direction:column;gap:10px}
+.book{display:flex;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:14px;cursor:pointer}
+.book .nm{flex:1;min-width:0}
+.book .t{font:600 15px var(--ff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.book .bar{height:3px;background:var(--line);border-radius:2px;margin-top:8px}
+.book .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.book .pc{font-size:12px;color:var(--muted);margin-top:5px}
+.book button{border:none;color:var(--muted);font-size:18px;padding:4px 8px}
+.note{font-size:12px;color:var(--muted);margin-top:28px;line-height:1.55}
+/* loading */
+#load{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:var(--bg);z-index:50;padding:30px;text-align:center}
+#load .msg{font-size:14px;color:var(--muted)}
+#load .pb{width:min(260px,70vw);height:4px;background:var(--line);border-radius:2px;overflow:hidden}
+#load .pb i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+/* reader */
+#stage{position:fixed;inset:0}
+#viewport{position:absolute;overflow:hidden}
+#content{font-family:var(--ff);font-size:var(--fs);line-height:var(--lh);column-fill:auto;will-change:transform}
+#content p{margin:0;text-indent:1.5em;text-align:var(--ta);hyphens:auto;-webkit-hyphens:auto;orphans:2;widows:2;overflow-wrap:break-word}
+#content p.first{text-indent:0}
+#content p.small{font-size:.84em;line-height:1.45;margin:.3em 0}
+#content h1,#content h2{font-weight:600;line-height:1.25;break-after:avoid;text-align:left;text-wrap:balance}
+#content h1{font-size:1.5em;margin:.5em 0 .8em}
+#content h2{font-size:1.17em;margin:1.3em 0 .6em}
+.fig{margin:.5em auto;break-inside:avoid;border-radius:4px;overflow:hidden;background:var(--line)}
+.fig canvas{width:100%;height:100%;display:block}
+.chip{break-inside:avoid;margin:.7em 0;padding:.55em .85em;border:1px solid var(--line);border-radius:10px;font:500 13px/1.4 Inter,sans-serif;color:var(--muted);cursor:pointer}
+body.dark .fig canvas,body.dark #oCan{filter:invert(.88) hue-rotate(180deg)}
+body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
+#hdr,#ftr{position:absolute;left:0;right:0;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:var(--muted);padding:0 var(--m);pointer-events:none;white-space:nowrap}
+#hdr{top:14px}#ftr{bottom:12px}
+#hdr span{overflow:hidden;text-overflow:ellipsis}
+.bar2{position:fixed;left:0;right:0;background:var(--ui);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);z-index:10;display:flex;align-items:center;gap:8px;padding:10px 12px;border-color:var(--line);transition:transform .2s}
+#top{top:0;border-bottom:1px solid var(--line);padding-top:max(10px,env(safe-area-inset-top))}
+#bot{bottom:0;border-top:1px solid var(--line);flex-direction:column;align-items:stretch;padding-bottom:max(12px,env(safe-area-inset-bottom))}
+#top.off{transform:translateY(-110%)}#bot.off{transform:translateY(110%)}
+#top .ttl{flex:1;min-width:0;font:600 14px var(--ff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+#top button{border:none;padding:6px 8px}
+#slider{width:100%;accent-color:var(--accent)}
+#botLbl{font-size:12px;color:var(--muted);text-align:center}
+.sheet{position:fixed;left:0;right:0;bottom:0;max-height:75vh;overflow:auto;background:var(--bg);border-top:1px solid var(--line);border-radius:18px 18px 0 0;z-index:20;padding:18px 18px max(22px,env(safe-area-inset-bottom));box-shadow:0 -10px 40px #0003}
+.sheet h3{margin:0 0 14px;font:600 16px var(--ff)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:12px 0}
+.row>span{font-size:13px;color:var(--muted)}
+.seg{display:flex;gap:6px}
+.seg button.on{border-color:var(--accent);color:var(--accent)}
+.sw{width:30px;height:30px;border-radius:50%;padding:0}
+#scrim{position:fixed;inset:0;background:#0004;z-index:15}
+#tocList a{display:block;padding:10px 0;border-bottom:1px solid var(--line);color:var(--fg);text-decoration:none;font-size:14px;cursor:pointer}
+#tocList a.d1{padding-left:16px;font-size:13px}#tocList a.d2{padding-left:32px;font-size:13px;color:var(--muted)}
+#tocList a.cur{color:var(--accent)}
+/* original page view */
+#orig{position:fixed;inset:0;background:var(--bg);z-index:30;display:flex;flex-direction:column}
+#orig .obar{display:flex;align-items:center;gap:6px;padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top));border-bottom:1px solid var(--line)}
+#orig .obar span.l{flex:1;text-align:center;font-size:13px;color:var(--muted)}
+#oScroll{flex:1;overflow:auto;padding:8px;-webkit-overflow-scrolling:touch}
+#oCan{display:block;margin:0 auto;box-shadow:0 1px 8px #0002;background:#fff}
+</style>
+</head>
+<body>
+
+<div id="lib">
+  <h1>Reflow</h1>
+  <p class="tag">A Kindle-style reader for PDF books. It rebuilds paragraphs from the PDF, so you can change the font, size and margins. Tap the left or right side to turn pages. Tap the middle for controls.</p>
+  <label class="btn primary" for="file">Open a PDF</label>
+  <input id="file" type="file" accept="application/pdf,.pdf" class="hidden">
+  <div id="books"></div>
+  <p class="note">Tip: you can also drop a PDF anywhere on this page. Your books stay on this device, in this browser. Nothing is uploaded. Best results: text-based PDFs (not scans) with one or two columns. Figures show as a link to the original page.</p>
+</div>
+
+<div id="load" class="hidden"><div class="msg" id="loadMsg">Opening…</div><div class="pb"><i id="loadBar"></i></div></div>
+
+<div id="reader" class="hidden">
+  <div id="stage">
+    <div id="hdr"><span id="hdrL"></span><span id="hdrR"></span></div>
+    <div id="viewport"><div id="content"></div></div>
+    <div id="ftr"><span id="ftrL"></span><span id="ftrR"></span></div>
+  </div>
+  <div id="top" class="bar2 off">
+    <button id="bLib">‹ Library</button>
+    <div class="ttl" id="ttl"></div>
+    <button id="bToc" title="Contents">☰</button>
+    <button id="bAa" title="Text settings">Aa</button>
+    <button id="bOrig" title="Original page">⧉</button>
+  </div>
+  <div id="bot" class="bar2 off">
+    <input type="range" id="slider" min="0" max="1000" value="0">
+    <div id="botLbl"></div>
+  </div>
+  <div id="scrim" class="hidden"></div>
+  <div id="sAa" class="sheet hidden">
+    <h3>Text</h3>
+    <div class="row"><span>Layout</span><div class="seg" data-k="mode"><button data-v="pages">Pages</button><button data-v="scroll">Scroll</button></div></div>
+    <div class="row"><span>Size</span><div class="seg"><button data-a="fs-">A−</button><button data-a="fs+">A+</button></div></div>
+    <div class="row"><span>Font</span><div class="seg" data-k="font"><button data-v="serif">Literata</button><button data-v="georgia">Georgia</button><button data-v="sans">Inter</button></div></div>
+    <div class="row"><span>Spacing</span><div class="seg" data-k="lh"><button data-v="1.35">Tight</button><button data-v="1.55">Normal</button><button data-v="1.8">Loose</button></div></div>
+    <div class="row"><span>Margins</span><div class="seg" data-k="margin"><button data-v="14">S</button><button data-v="24">M</button><button data-v="40">L</button></div></div>
+    <div class="row"><span>Align</span><div class="seg" data-k="align"><button data-v="justify">Justify</button><button data-v="left">Left</button></div></div>
+    <div class="row"><span>Page flash</span><div class="seg" data-k="flash"><button data-v="off">Off</button><button data-v="on">E-ink</button></div></div>
+    <div class="row"><span>Theme</span><div class="seg" data-k="theme"><button class="sw" data-v="light" style="background:#fbfaf7"></button><button class="sw" data-v="sepia" style="background:#f4ecd8"></button><button class="sw" data-v="paper" title="E-ink paper" style="background:#e8e6df var(--grain)"></button><button class="sw" data-v="dark" style="background:#111"></button></div></div>
+  </div>
+  <div id="sToc" class="sheet hidden"><h3>Contents</h3><div id="tocList"></div></div>
+</div>
+
+<div id="flash"></div>
+<div id="orig" class="hidden">
+  <div class="obar">
+    <button id="oBack">‹ Text</button>
+    <span class="l" id="oLbl"></span>
+    <button id="oZo">−</button><button id="oZi">+</button>
+    <button id="oPrev">‹</button><button id="oNext">›</button>
+  </div>
+  <div id="oScroll"><canvas id="oCan"></canvas></div>
+</div>
+
+<script src="reader.js"></script>
+<script src="register-sw.js"></script>
+</body>
+</html>
