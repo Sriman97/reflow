@@ -1,5 +1,5 @@
 /* ==CORE-START== : PDF → reflowable blocks */
-const CORE_VERSION = 9;
+const CORE_VERSION = 13;
 
 function median(a){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[b.length>>1]; }
 function pct(a,p){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[Math.min(b.length-1,Math.floor(p*b.length))]; }
@@ -36,6 +36,36 @@ async function extractPages(pdf, onProg){
       const size = Math.hypot(c,d) || it.height;
       if(size < 1) continue;
       items.push({s:it.str, x:e-vx0, y:f-vy0, w:it.width, size, b:isBold(it.fontName), i:isItal(it.fontName)||Math.abs(c)>0.12*Math.abs(d)});
+    }
+    // Links (footnote references, cross-references, web links).
+    const links=[];
+    try{
+      const an=await page.getAnnotations({intent:'display'});
+      for(const a of an){
+        if(a.subtype!=='Link' || !a.rect) continue;
+        let key=null;
+        if(a.url && /^(https?:|mailto:)/i.test(a.url)) key='u:'+a.url;
+        else if(a.dest){
+          try{
+            let d=a.dest; if(typeof d==='string') d=await pdf.getDestination(d);
+            if(Array.isArray(d) && d[0]!=null){
+              const tp = typeof d[0]==='object' ? await pdf.getPageIndex(d[0]) : d[0];
+              const kind=d[1]&&d[1].name; let ty=null;
+              if(kind==='XYZ') ty=d[3]; else if(kind==='FitH'||kind==='FitBH') ty=d[2];
+              key='p:'+tp+':'+(typeof ty==='number' ? Math.round(ty-vy0) : '');
+            }
+          }catch(e){}
+        }
+        if(key) links.push({x0:Math.min(a.rect[0],a.rect[2])-vx0-1, x1:Math.max(a.rect[0],a.rect[2])-vx0+1, y0:Math.min(a.rect[1],a.rect[3])-vy0-1, y1:Math.max(a.rect[1],a.rect[3])-vy0+1, key});
+      }
+    }catch(e){}
+    if(links.length) for(const it of items){
+      const cy=it.y+it.size*0.3;
+      for(const L of links){
+        if(cy<L.y0 || cy>L.y1) continue;
+        const ov=Math.min(it.x+it.w,L.x1)-Math.max(it.x,L.x0);
+        if(ov > Math.max(1,it.w)*0.6){ it.lk=L.key; break; }
+      }
     }
     let fig=false;
     try{
@@ -77,8 +107,9 @@ function splitColumns(items, pw){
 }
 
 // Inline style markers: \uE000/\uE001 italic, \uE002/\uE003 bold.
-const MARKS=/[\uE000-\uE003]/g;
-function collapseMarks(r){ return r.replace(/\uE001(\s*)\uE000/g,'$1').replace(/\uE003(\s*)\uE002/g,'$1').replace(/\uE000(\s*)\uE001/g,'$1').replace(/\uE002(\s*)\uE003/g,'$1'); }
+// \uE006key\uE007 … \uE008 link, \uE009/\uE00A superscript, \uE00B/\uE00C subscript.
+const MARKS=/\uE006[^\uE007]*\uE007|[\uE000-\uE00C]/g;
+function collapseMarks(r){ return r.replace(/\uE001(\s*)\uE000/g,'$1').replace(/\uE003(\s*)\uE002/g,'$1').replace(/\uE000(\s*)\uE001/g,'$1').replace(/\uE002(\s*)\uE003/g,'$1').replace(/\uE00A\uE009/g,'').replace(/\uE00C\uE00B/g,''); }
 
 // Group text items into lines (same baseline), left to right.
 function itemsToLines(items){
@@ -98,16 +129,29 @@ function itemsToLines(items){
     let t='', raw='', lastX1=null, boldC=0, allC=0; const cnt={};
     for(const it of L.items){ allC+=it.s.length; if(it.b) boldC+=it.s.length; }
     L.bold = allC>0 && boldC/allC > 0.6;
+    // Baseline and size of the main text of the line (for superscripts).
+    const sz={}; for(const it of L.items){ const k=Math.round(it.size*2)/2; sz[k]=(sz[k]||0)+it.s.length; }
+    const mainSize=+Object.entries(sz).sort((a,b)=>b[1]-a[1])[0][0];
+    const baseY=median(L.items.filter(it=>Math.abs(it.size-mainSize)<0.6).map(it=>it.y));
+    let curLk=null;
     for(const it of L.items){
+      const lk=it.lk||null;
+      if(curLk && lk!==curLk){ raw+='\uE008'; curLk=null; }   // close a link before the space that follows it
       if(lastX1!==null){
         const gap=it.x-lastX1;
         if(gap > it.size*0.15 && !/\s$/.test(t) && !/^\s/.test(it.s)){ t+=' '; raw+=' '; }
       }
       t+=it.s;
-      raw += it.i ? '\uE000'+it.s+'\uE001' : (it.b && !L.bold ? '\uE002'+it.s+'\uE003' : it.s);
+      let piece = it.i ? '\uE000'+it.s+'\uE001' : (it.b && !L.bold ? '\uE002'+it.s+'\uE003' : it.s);
+      const small = it.size < mainSize*0.92;
+      if(small && it.y-baseY > mainSize*0.15) piece='\uE009'+piece+'\uE00A';
+      else if(small && baseY-it.y > mainSize*0.1) piece='\uE00B'+piece+'\uE00C';
+      if(lk && lk!==curLk){ raw+='\uE006'+lk+'\uE007'; curLk=lk; }
+      raw += piece;
       lastX1 = Math.max(lastX1===null?-1e9:lastX1, it.x+it.w);
       const k=Math.round(it.size*2)/2; cnt[k]=(cnt[k]||0)+it.s.length;
     }
+    if(curLk) raw+='\uE008';
     L.raw=collapseMarks(raw.replace(/\s+/g,' ')).trim();
     L.text=t.replace(/\s+/g,' ').trim();
     L.x0=L.items[0].x; L.x1=lastX1;
@@ -152,23 +196,24 @@ function buildBlocks(pages){
   const lead = median(ratios) || 1.25;
 
   const blocks=[]; let cur=null; const pendingFigs=[];
-  const terminal=/[.!?:"”’»)\]]$/;
+  const terminal=/[.!?:"”’»)\]](\d{1,3}|[*†‡])?$/;   // allow a trailing footnote number
   const flush=()=>{
     if(cur){
       const head = cur.t==='h1'||cur.t==='h2';
       const txt = head ? cur.text.trim() : collapseMarks(cur.raw||'').trim();
-      if(cur.text.trim()){ cur.text=txt; delete cur.raw; delete cur.x; delete cur.n; blocks.push(cur); }
+      if(cur.text.trim()){ cur.text=txt; delete cur.raw; delete cur.x; delete cur.n; delete cur.hang; blocks.push(cur); }
       cur=null;
     }
     while(pendingFigs.length) blocks.push({t:'chip', page:pendingFigs.shift()});
   };
   const append=(L,t=L.text,r=L.raw)=>{
     if(cur.raw===undefined) cur.raw='';
+    if(cur.y0===undefined) cur.y0=Math.round(L.y+L.size*0.8);
     cur.n=(cur.n||0)+1;
     if(!cur.text){ cur.text=t; cur.raw=r; return; }
     if((/[A-Za-zÀ-ɏ]-$/.test(cur.text) && /^[a-zß-ÿ]/.test(t)) || /[­¬]$/.test(cur.text)){
       cur.text=cur.text.slice(0,-1)+t;
-      cur.raw=cur.raw.replace(/[-­¬]([\uE000-\uE003]*)$/,'$1')+r;
+      cur.raw=cur.raw.replace(/[-­¬]([\uE000-\uE005\uE008-\uE00C]*)$/,'$1')+r;
     } else { cur.text+=' '+t; cur.raw+=' '+r; }
   };
   const listRe=/^(\(?\d{1,3}[.)]|\(?[a-h][.)]|\(?[A-H]\)|\(?[ivx]{1,4}[.)]|\([ivxlc]{1,5}\)|[•●▪◦■‣⁃○–—-])\s+(?=\S)/;
@@ -232,13 +277,15 @@ function buildBlocks(pages){
         const gapOK = prev && gapB <= lead*1.45 && gapB >= 0;
         const prevEnded = !prev || !gapOK || terminal.test(prev.text) || prev.x1 < right - body*2;
         const hyphenCont = prev && gapOK && /[A-Za-z]-$/.test(prev.text) && /^[a-z]/.test(L.text);
-        const lm = !hyphenCont && L.text.match(listRe);
+        const lm = !hyphenCont && (L.text.match(listRe) || L.text.match(/^(\d{1,3}\.)(?=[A-Z“"‘(\[])/));
         const lvlOf = o => o < body*0.8 ? 0 : (o < paraIndent + body*2.4 ? 1 : 2);
         if(lm && prevEnded){
           flush();
           const mk=lm[1], at=L.raw.indexOf(mk);
-          const rest = at>=0 ? (L.raw.slice(0,at)+L.raw.slice(at+mk.length)).replace(/^([\uE000-\uE003]*)\s+/,'$1') : L.text.slice(lm[0].length);
-          cur={t:'li', mk, lvl:lvlOf(off), x:L.x0, text:'', page:pi}; append(L, L.text.slice(lm[0].length), rest);
+          const mkl = (L.raw.match(/^\uE006([^\uE007]*)\uE007/)||[])[1];   // note number that links back to the text
+          const rest = at>=0 ? (L.raw.slice(0,at)+L.raw.slice(at+mk.length)).replace(/^([\uE000-\uE005\uE009-\uE00C]*)\s+/,'$1') : L.text.slice(lm[0].length);
+          cur={t:'li', mk, lvl:lvlOf(off), x:L.x0, text:'', page:pi}; if(mkl) cur.mkl=mkl;
+          append(L, L.text.slice(lm[0].length).trimStart(), rest.replace(/^\uE006[^\uE007]*\uE007\uE008/,'').trimStart());
           prev=L; continue;
         }
         const pageStart = !prev && cur && cur.page<pi && !terminal.test(cur.text);
@@ -267,7 +314,9 @@ function buildBlocks(pages){
         else if(hyphenCont) brk=false;
         else if(prev){
           if(gapB > lead*1.45 || gapB < 0) brk=true;
-          else if(indented(L)) brk=true;
+          else if(indented(L) && terminal.test(prev.text)) brk=true;
+          else if(indented(L) && prev.x1 > right - body*1.5 && !cur.hang && cur.n>1) brk=true;
+          else if(indented(L)){ cur.hang=1; }
           else if(prev.x1 < right - body*2.5 && terminal.test(prev.text)) brk=true;
           else if(prev.x1 < right - colW*0.35) brk=true;
           else if(!!cur.small !== (L.size < body*0.85)) brk=true;
@@ -322,19 +371,36 @@ const content=$('content'), viewport=$('viewport');
 function showLoading(msg,frac){ $('load').classList.remove('hidden'); $('loadMsg').textContent=msg; $('loadBar').style.width=((frac||0)*100)+'%'; }
 function hideLoading(){ $('load').classList.add('hidden'); }
 function esc(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-// Text with inline style markers -> safe HTML.
+// Text with inline markers -> safe HTML (italic, bold, sup, sub, links).
 function fmt(t){
-  let it=0, bo=0;
-  let h=esc(t).replace(/[\uE000-\uE003]/g,m=>{
-    if(m==='\uE000'){ if(it) return ''; it=1; return '<em>'; }
-    if(m==='\uE001'){ if(!it) return ''; it=0; return '</em>'; }
-    if(m==='\uE002'){ if(bo) return ''; bo=1; return '<strong>'; }
-    if(!bo) return ''; bo=0; return '</strong>';
-  });
-  if(it) h+='</em>'; if(bo) h+='</strong>';
-  return h.replace(/\n/g,'<br>');
+  let out='', it=0, bo=0, su=0, sb=0, ln=0;
+  const re=/([^]*)|[--]|[^-]+/g; let m;
+  const tog=(on,open,close)=>on?close:open;
+  while((m=re.exec(t))){
+    const c=m[0];
+    if(m[1]!==undefined){
+      if(ln) out+='</a>';
+      const k=m[1];
+      if(k.startsWith('u:') && /^(https?:|mailto:)/i.test(k.slice(2))) out+=`<a class="xl" href="${esc(k.slice(2))}" target="_blank" rel="noopener">`;
+      else out+=`<a class="il" data-to="${esc(k.slice(2))}">`;
+      ln=1; continue;
+    }
+    if(c===''){ if(ln){ out+='</a>'; ln=0; } continue; }
+    if(c===''){ if(!it){ out+='<em>'; it=1; } continue; }
+    if(c===''){ if(it){ out+='</em>'; it=0; } continue; }
+    if(c===''){ if(!bo){ out+='<strong>'; bo=1; } continue; }
+    if(c===''){ if(bo){ out+='</strong>'; bo=0; } continue; }
+    if(c===''){ if(!su){ out+='<sup>'; su=1; } continue; }
+    if(c===''){ if(su){ out+='</sup>'; su=0; } continue; }
+    if(c===''){ if(!sb){ out+='<sub>'; sb=1; } continue; }
+    if(c===''){ if(sb){ out+='</sub>'; sb=0; } continue; }
+    if(c.length===1 && c>='' && c<='') continue;
+    out+=esc(c).replace(/\n/g,'<br>');
+  }
+  if(sb) out+='</sub>'; if(su) out+='</sup>'; if(bo) out+='</strong>'; if(it) out+='</em>'; if(ln) out+='</a>';
+  return out;
 }
-const plain = t => (t||'').replace(/[\uE000-\uE003]/g,'');
+const plain = t => (t||'').replace(/\uE006[^\uE007]*\uE007|[\uE000-\uE00C]/g,'');
 
 /* ---------- library ---------- */
 async function renderLibrary(){
@@ -468,7 +534,7 @@ function blockHTML(b,i){
   if(b.t==='h1'||b.t==='h2') return `<${b.t} data-i="${i}">${esc(b.text)}</${b.t}>`;
   if(b.t==='img'){ const {w,h}=figSize(b.ar); return `<div class="fig" data-i="${i}" data-p="${b.page}" style="width:${w}px;height:${h}px"></div>`; }
   if(b.t==='chip') return `<div class="chip" data-i="${i}" data-p="${b.page}">▣ Figure on page ${b.page+1}. Tap to see the original page.</div>`;
-  if(b.t==='li') return `<div class="li l${b.lvl||0}" data-i="${i}"><span class="mk">${esc(b.mk)}</span><div class="lt">${fmt(b.text)}</div></div>`;
+  if(b.t==='li') return `<div class="li l${b.lvl||0}" data-i="${i}"><span class="mk">${b.mkl?`<a class="il" data-to="${esc(b.mkl.slice(2))}">${esc(b.mk)}</a>`:esc(b.mk)}</span><div class="lt">${fmt(b.text)}</div></div>`;
   if(b.t==='q') return `<p class="q l${b.lvl||1}" data-i="${i}">${fmt(b.text)}</p>`;
   if(b.t==='c') return `<p class="c" data-i="${i}">${fmt(b.text)}</p>`;
   return `<p data-i="${i}" class="${b.ind?'':'ni'}${b.small?' small':''}">${fmt(b.text)}</p>`;
@@ -556,6 +622,31 @@ function inkFlash(){
 function next(){ if(isScroll()){ viewport.scrollBy({top:S.H*0.9,behavior:'smooth'}); hideBars(); return; } inkFlash(); if(S.page<S.pages-1) goPage(S.page+1); else if(S.si<S.sec.length-1) renderSection(S.si+1); hideBars(); }
 function prev(){ if(isScroll()){ viewport.scrollBy({top:-S.H*0.9,behavior:'smooth'}); hideBars(); return; } inkFlash(); if(S.page>0) goPage(S.page-1); else if(S.si>0) renderSection(S.si-1,{last:true}); hideBars(); }
 function isScroll(){ return S.set.mode==='scroll'; }
+
+/* ---------- internal links (footnotes) ---------- */
+const backStack=[];
+function linkTarget(to){
+  const [ps,ys]=String(to).split(':'); const p=+ps, y=ys===''||ys==null?null:+ys;
+  let first=-1;
+  for(let i=0;i<S.blocks.length;i++){
+    const b=S.blocks[i]; if(b.page<p) continue;
+    if(b.page>p) return first>=0?first:i;
+    if(first<0) first=i;
+    if(y==null || b.y0==null || b.y0 <= y+4) return i;
+  }
+  return first>=0?first:S.blocks.length-1;
+}
+function followLink(to){
+  const i=linkTarget(to); if(i<0) return;
+  backStack.push({pos:S.pos, off:S.off}); if(backStack.length>20) backStack.shift();
+  $('backPill').classList.remove('hidden');
+  hideBars(); show(i,0);
+}
+$('backPill').addEventListener('click',e=>{
+  e.stopPropagation();
+  const b=backStack.pop(); if(b) show(b.pos,b.off);
+  if(!backStack.length) $('backPill').classList.add('hidden');
+});
 function show(block,off){ if(isScroll()) renderScroll(block); else renderSection(secOf(block),{block,off}); }
 function jump(block){ show(block,0); }
 
@@ -590,6 +681,8 @@ stage.addEventListener('touchend',e=>{
 stage.addEventListener('click',e=>{
   if(Date.now()-swipedAt<450) return;
   const sel=window.getSelection&&window.getSelection(); if(sel && String(sel).trim()) return;
+  const xl=e.target.closest('a.xl'); if(xl) return;   // web link: let the browser open it
+  const il=e.target.closest('a.il'); if(il){ e.preventDefault(); followLink(il.dataset.to); return; }
   const fig=e.target.closest('.chip,.fig'); if(fig){ openOriginal(+fig.dataset.p); return; }
   const x=e.clientX/window.innerWidth;
   if(x<0.3) prev(); else if(x>0.7) next(); else toggleBars();
@@ -614,7 +707,7 @@ $('bToc').onclick=()=>{
   $('tocList').innerHTML = S.toc.length ? S.toc.map((e,k)=>`<a class="d${Math.min(2,e.depth)}${k===cur?' cur':''}" data-b="${e.block}">${esc(e.title)}</a>`).join('') : '<p class="note">No chapters found in this PDF.</p>';
   openSheet('sToc');
 };
-$('tocList').onclick=e=>{ const a=e.target.closest('a'); if(!a) return; closeSheets(); hideBars(); jump(+a.dataset.b); };
+$('tocList').onclick=e=>{ const a=e.target.closest('a'); if(!a) return; closeSheets(); hideBars(); backStack.length=0; $('backPill').classList.add('hidden'); jump(+a.dataset.b); };
 $('slider').addEventListener('change',e=>{
   const target=e.target.value/1000*S.total; let i=0; while(i<S.cum.length-1 && S.cum[i+1]<=target) i++; jump(i);
 });
