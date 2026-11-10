@@ -1,7 +1,7 @@
 // Reflow service worker.
 // App code (page, reader.js): network first, so updates arrive on the next online launch.
 // Big static files (PDF.js, icons, fonts): cache first. Everything works offline after one visit.
-const CACHE = 'reflow-20261109-2008';
+const CACHE = 'reflow-20261109-2043';
 const SHELL = ['./','index.html','reader.js','register-sw.js','pdf.min.js','pdf.worker.min.js','manifest.webmanifest',
   'icons/32.png','icons/192.png','icons/512.png','icons/maskable-512.png','icons/apple-touch-icon.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, {cache:'reload'})))).then(() => self.skipWaiting())); });

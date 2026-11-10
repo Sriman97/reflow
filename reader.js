@@ -1,5 +1,5 @@
 /* ==CORE-START== : PDF → reflowable blocks */
-const CORE_VERSION = 13;
+const CORE_VERSION = 15;
 
 function median(a){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[b.length>>1]; }
 function pct(a,p){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[Math.min(b.length-1,Math.floor(p*b.length))]; }
@@ -79,11 +79,78 @@ async function extractPages(pdf, onProg){
       }
       if(paths > 150) fig=true;
     }catch(e){}
-    pages.push({w:vx1-vx0, h:vy1-vy0, items, fig});
+    const figs = ol ? findFigures(ol, items, vx0, vy0, vx1-vx0, vy1-vy0) : [];
+    pages.push({w:vx1-vx0, h:vy1-vy0, items, fig, figs});
     page.cleanup();
     if(onProg) await onProg(i, pdf.numPages);
   }
   return pages;
+}
+
+// Find tables, charts and pictures on a page: boxes of images and vector drawings,
+// merged into regions, plus the small label text inside or next to them.
+function findFigures(ol, items, vx0, vy0, pw, ph){
+  const O=pdfjsLib.OPS;
+  const mul=(m,n)=>[m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1], m[0]*n[2]+m[2]*n[3], m[1]*n[2]+m[3]*n[3], m[0]*n[4]+m[2]*n[5]+m[4], m[1]*n[4]+m[3]*n[5]+m[5]];
+  const pt=(m,x,y)=>[m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]];
+  let ctm=[1,0,0,1,0,0]; const stack=[], boxes=[];
+  const add=(m,xa,ya,xb,yb,img)=>{
+    const q=[pt(m,xa,ya),pt(m,xb,ya),pt(m,xa,yb),pt(m,xb,yb)];
+    const b={x0:Math.min(...q.map(v=>v[0]))-vx0, y0:Math.min(...q.map(v=>v[1]))-vy0, x1:Math.max(...q.map(v=>v[0]))-vx0, y1:Math.max(...q.map(v=>v[1]))-vy0, img};
+    const w=b.x1-b.x0, h=b.y1-b.y0;
+    if(!(w>=0&&h>=0) || w*h > pw*ph*0.85) return;            // page backgrounds
+    if(img && w*h < 600) return;                               // tiny icons, glyph masks
+    b.n=1; boxes.push(b);
+  };
+  for(let k=0;k<ol.fnArray.length;k++){
+    const fn=ol.fnArray[k], a=ol.argsArray[k];
+    if(fn===O.save) stack.push(ctm);
+    else if(fn===O.restore) ctm=stack.pop()||ctm;
+    else if(fn===O.transform) ctm=mul(ctm,a);
+    else if(fn===O.paintFormXObjectBegin){ stack.push(ctm); if(a&&a[0]) ctm=mul(ctm,a[0]); }
+    else if(fn===O.paintFormXObjectEnd) ctm=stack.pop()||ctm;
+    else if(fn===O.paintImageXObject||fn===O.paintInlineImageXObject||fn===O.paintImageXObjectRepeat||fn===O.paintJpegXObject) add(ctm,0,0,1,1,true);
+    else if(fn===O.constructPath && a && a[2]) add(ctm,a[2][0],a[2][1],a[2][2],a[2][3],false);
+  }
+  if(!boxes.length) return [];
+  // Merge boxes that touch or nearly touch.
+  const near=(a,b,g)=>a.x0-g<=b.x1 && b.x0-g<=a.x1 && a.y0-g<=b.y1 && b.y0-g<=a.y1;
+  let rs=boxes.map(b=>({...b}));
+  for(let changed=true; changed;){
+    changed=false;
+    for(let i=0;i<rs.length && !changed;i++) for(let j=i+1;j<rs.length;j++) if(near(rs[i],rs[j],10)){
+      const a=rs[i], b=rs[j]; rs[i]={x0:Math.min(a.x0,b.x0),y0:Math.min(a.y0,b.y0),x1:Math.max(a.x1,b.x1),y1:Math.max(a.y1,b.y1),img:a.img||b.img,n:a.n+b.n};
+      rs.splice(j,1); changed=true; break;
+    }
+  }
+  // Keep real figures, not text underlines or lone rules.
+  rs=rs.filter(r=>{
+    const w=r.x1-r.x0, h=r.y1-r.y0;
+    const edge = r.x0<3 || r.y0<3 || r.x1>pw-3 || r.y1>ph-3;          // page decorations, bleeds
+    if(r.img) return w*h>2500 && !(edge && w*h<pw*ph*0.05);
+    return !edge && r.n>=6 && w>40 && h>30;                              // a drawing has many strokes
+  });
+  if(!rs.length) return [];
+  // Text inside the region, and small label text right next to it, belongs to the figure.
+  const sizes=items.map(it=>it.size).sort((a,b)=>a-b); const bodyGuess=sizes[sizes.length>>1]||10;
+  for(const r of rs){
+    for(let pass=0;pass<4;pass++){
+      let grew=false;
+      for(const it of items){
+        if(it.f) continue;
+        const cx=it.x+it.w/2, cy=it.y+it.size*0.35;
+        const inside = cx>=r.x0-2 && cx<=r.x1+2 && cy>=r.y0-2 && cy<=r.y1+2;
+        const label = it.size < bodyGuess*0.93 && it.x+it.w>=r.x0-36 && it.x<=r.x1+36 && cy>=r.y0-24 && cy<=r.y1+24;
+        if(inside || label){
+          it.f=1;
+          const nx0=Math.min(r.x0,it.x), nx1=Math.max(r.x1,it.x+it.w), ny0=Math.min(r.y0,it.y-it.size*0.3), ny1=Math.max(r.y1,it.y+it.size*0.9);
+          if(nx0<r.x0||nx1>r.x1||ny0<r.y0||ny1>r.y1){ r.x0=nx0; r.x1=nx1; r.y0=ny0; r.y1=ny1; grew=true; }
+        }
+      }
+      if(!grew) break;
+    }
+  }
+  return rs.map(r=>({x0:Math.max(0,r.x0-4), y0:Math.max(0,r.y0-4), x1:Math.min(pw,r.x1+4), y1:Math.min(ph,r.y1+4)}));
 }
 
 // Detect a two-column page: an empty vertical band near the middle.
@@ -165,7 +232,8 @@ function itemsToLines(items){
 function buildBlocks(pages){
   const sizeCnt={};
   for(const pg of pages){
-    pg.cols = splitColumns(pg.items, pg.w).map(itemsToLines);
+    const textItems = pg.items.filter(it=>!it.f);
+    pg.cols = splitColumns(textItems, pg.w).map(itemsToLines);
     for(const c of pg.cols) for(const L of c) sizeCnt[L.size]=(sizeCnt[L.size]||0)+L.text.length;
   }
   const body = +((Object.entries(sizeCnt).sort((a,b)=>b[1]-a[1])[0]||[10])[0]);
@@ -204,7 +272,7 @@ function buildBlocks(pages){
       if(cur.text.trim()){ cur.text=txt; delete cur.raw; delete cur.x; delete cur.n; delete cur.hang; blocks.push(cur); }
       cur=null;
     }
-    while(pendingFigs.length) blocks.push({t:'chip', page:pendingFigs.shift()});
+    while(pendingFigs.length) blocks.push(pendingFigs.shift());
   };
   const append=(L,t=L.text,r=L.raw)=>{
     if(cur.raw===undefined) cur.raw='';
@@ -233,8 +301,17 @@ function buildBlocks(pages){
   const headish = L => L.text.length<=90 && words(L.text)<=14 && !/[,;]$/.test(L.text) && !/[a-z]{2}\.$/.test(L.text);
   let prevPageEnd = 1;   // y/h of the last line on the previous text page (0 = bottom)
 
+  const figBlock=(pg,pi,r)=>({t:'fig', page:pi, box:[r.x0,r.y0,r.x1,r.y1].map(v=>Math.round(v*10)/10), pw:Math.round(pg.w), ph:Math.round(pg.h)});
   pages.forEach((pg,pi)=>{
     let textChars=0, firstOfPage=true;
+    const figQ = (pg.figs||[]).slice().sort((a,b)=>b.y1-a.y1);
+    const placeFigs = (L)=>{   // figures that start above this line go into the flow here
+      while(figQ.length && (!L || figQ[0].y1 > L.y + L.size)){
+        const fb=figBlock(pg,pi,figQ.shift());
+        if(cur && cur.t==='p' && L && !terminal.test(cur.text)) pendingFigs.push(fb);   // inside a paragraph: after it
+        else { flush(); blocks.push(fb); }
+      }
+    };
     const cols=pg.cols.map(c=>c.filter(L=>!L.drop));
     const firstL=(cols.find(c=>c.length)||[])[0];
     const sink = firstL ? (pg.h-firstL.y)/pg.h : 0;
@@ -249,6 +326,7 @@ function buildBlocks(pages){
       let prev=null;
       for(let j=0;j<ls.length;j++){
         const L=ls[j], nx=ls[j+1];
+        if(figQ.length) placeFigs(L);
         textChars+=L.text.length;
         const rel=L.size/body;
         const gapB = prev ? (prev.y-L.y)/body : 99, gapA = nx ? (L.y-nx.y)/body : 99;
@@ -329,9 +407,10 @@ function buildBlocks(pages){
     }
     const lastCol=[...cols].reverse().find(c=>c.length);
     if(lastCol) prevPageEnd = lastCol[lastCol.length-1].y/pg.h;
-    if(pg.fig){
-      if(textChars < 60){ flush(); blocks.push({t:'img', page:pi, ar:pg.w/pg.h}); prevPageEnd=1; }
-      else pendingFigs.push(pi);
+    if(pg.fig && textChars < 60 && !(pg.figs||[]).length){ flush(); blocks.push({t:'img', page:pi, ar:pg.w/pg.h}); prevPageEnd=1; }
+    else {
+      while(figQ.length) pendingFigs.push(figBlock(pg,pi,figQ.shift()));          // figures below the last line
+      if(pg.fig && !(pg.figs||[]).length) pendingFigs.push({t:'chip', page:pi});   // could not locate it: link to the page
     }
   });
   flush();
@@ -532,6 +611,12 @@ function figSize(ar){ let w=S.W, h=w/ar; const mh=S.H*0.94; if(h>mh){ h=mh; w=h*
 
 function blockHTML(b,i){
   if(b.t==='h1'||b.t==='h2') return `<${b.t} data-i="${i}">${esc(b.text)}</${b.t}>`;
+  if(b.t==='fig'){
+    const bw=b.box[2]-b.box[0], bh=b.box[3]-b.box[1];
+    let w = bw < b.pw*0.2 ? S.W*0.6 : S.W, h=w*bh/bw;          // full column width: tables need every pixel
+    const mh=S.H*0.9; if(h>mh){ h=mh; w=h*bw/bh; }
+    return `<div class="fig crop" data-i="${i}" data-p="${b.page}" data-box="${b.box.join(',')}" style="width:${Math.floor(w)}px;height:${Math.floor(h)}px"></div>`;
+  }
   if(b.t==='img'){ const {w,h}=figSize(b.ar); return `<div class="fig" data-i="${i}" data-p="${b.page}" style="width:${w}px;height:${h}px"></div>`; }
   if(b.t==='chip') return `<div class="chip" data-i="${i}" data-p="${b.page}">▣ Figure on page ${b.page+1}. Tap to see the original page.</div>`;
   if(b.t==='li') return `<div class="li l${b.lvl||0}" data-i="${i}"><span class="mk">${b.mkl?`<a class="il" data-to="${esc(b.mkl.slice(2))}">${esc(b.mk)}</a>`:esc(b.mk)}</span><div class="lt">${fmt(b.text)}</div></div>`;
@@ -547,9 +632,15 @@ async function drawFigs(){
     if(tok!==figToken) return;
     try{
       const page=await S.pdf.getPage(+el.dataset.p+1);
-      const dpr=Math.min(2,window.devicePixelRatio||1);
+      const dpr=Math.min(3,window.devicePixelRatio||1);
       const w=parseFloat(el.style.width);
-      const vp=page.getViewport({scale:w*dpr/page.view[2]});
+      let vp;
+      if(el.dataset.box){
+        const [x0,y0,x1,y1]=el.dataset.box.split(',').map(Number), pH=page.view[3]-page.view[1];
+        const sc=w*dpr/(x1-x0);
+        vp=page.getViewport({scale:sc, offsetX:-x0*sc, offsetY:-(pH-y1)*sc});
+        vp.width=(x1-x0)*sc; vp.height=(y1-y0)*sc;
+      } else vp=page.getViewport({scale:w*dpr/page.view[2]});
       const cv=document.createElement('canvas'); cv.width=Math.floor(vp.width); cv.height=Math.floor(vp.height);
       await page.render({canvasContext:cv.getContext('2d'), viewport:vp}).promise;
       if(tok!==figToken) return;
@@ -799,7 +890,7 @@ stage.addEventListener('click',e=>{
   const xl=e.target.closest('a.xl'); if(xl) return;   // web link: let the browser open it
   const il=e.target.closest('a.il') || nearestLink(e.clientX,e.clientY,30);
   if(il){ e.preventDefault(); followLink(il.dataset.to, il); return; }
-  const fig=e.target.closest('.chip,.fig'); if(fig){ openOriginal(+fig.dataset.p); return; }
+  const fig=e.target.closest('.chip,.fig'); if(fig){ openOriginal(+fig.dataset.p, fig.dataset.box); return; }
   const x=e.clientX/window.innerWidth;
   if(x<0.3) prev(); else if(x>0.7) next(); else toggleBars();
 });
@@ -838,21 +929,32 @@ $('sAa').addEventListener('click',e=>{
 /* ---------- original page view ---------- */
 const O={page:0, zoom:1, task:null};
 $('bOrig').onclick=()=>openOriginal((S.blocks[S.pos]||{page:0}).page);
-function openOriginal(p){ O.page=p; O.start=p; O.zoom=1; $('orig').classList.remove('hidden'); renderOrig(); }
+function openOriginal(p, box){
+  O.page=p; O.start=p; O.box = box ? box.split(',').map(Number) : null; O.zoom = O.box ? 1 : 1;
+  $('orig').classList.remove('hidden'); renderOrig();
+}
 function closeOriginal(){
   $('orig').classList.add('hidden');
   if(O.page!==O.start && S.blocks.length){ const i=S.blocks.findIndex(b=>b.page>=O.page); if(i>=0) jump(i); }
   else if(!S.blocks.length){ $('bLib').onclick(); }
 }
-function origGo(d){ O.page=Math.max(0,Math.min(S.pdf.numPages-1,O.page+d)); renderOrig(); }
+function origGo(d){ O.box=null; O.page=Math.max(0,Math.min(S.pdf.numPages-1,O.page+d)); renderOrig(); }
 async function renderOrig(){
-  $('oLbl').textContent=`Page ${O.page+1} of ${S.pdf.numPages}`;
+  $('oLbl').textContent = O.box ? `Figure · page ${O.page+1}` : `Page ${O.page+1} of ${S.pdf.numPages}`;
   try{
     if(O.task){ try{ O.task.cancel(); }catch(e){} }
     const page=await S.pdf.getPage(O.page+1);
     const dpr=Math.min(2.5,window.devicePixelRatio||1);
-    const fit=($('oScroll').clientWidth-16)/page.view[2];
-    const vp=page.getViewport({scale:fit*O.zoom*dpr});
+    let vp;
+    if(O.box){
+      // Zoomed figure: fit the figure to the screen width, then zoom with + / −.
+      const [x0,y0,x1,y1]=O.box, pH=page.view[3]-page.view[1];
+      const sc=($('oScroll').clientWidth-16)/(x1-x0)*O.zoom*dpr;
+      vp=page.getViewport({scale:sc, offsetX:-x0*sc, offsetY:-(pH-y1)*sc}); vp.width=(x1-x0)*sc; vp.height=(y1-y0)*sc;
+    } else {
+      const fit=($('oScroll').clientWidth-16)/page.view[2];
+      vp=page.getViewport({scale:fit*O.zoom*dpr});
+    }
     const cv=$('oCan'); cv.width=Math.floor(vp.width); cv.height=Math.floor(vp.height);
     cv.style.width=Math.floor(vp.width/dpr)+'px'; cv.style.height=Math.floor(vp.height/dpr)+'px';
     O.task=page.render({canvasContext:cv.getContext('2d'), viewport:vp});
@@ -861,7 +963,7 @@ async function renderOrig(){
 }
 $('oBack').onclick=closeOriginal;
 $('oPrev').onclick=()=>origGo(-1); $('oNext').onclick=()=>origGo(1);
-$('oZi').onclick=()=>{ O.zoom=Math.min(4,O.zoom*1.4); renderOrig(); };
+$('oZi').onclick=()=>{ O.zoom=Math.min(6,O.zoom*1.4); renderOrig(); };
 $('oZo').onclick=()=>{ O.zoom=Math.max(0.6,O.zoom/1.4); renderOrig(); };
 
 /* ---------- app extras ---------- */
