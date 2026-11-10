@@ -1,5 +1,5 @@
 // Offline cache: the app shell works without a network after the first visit.
-const CACHE = 'reflow-v1';
+const CACHE = 'reflow-v2';
 const SHELL = ['./','index.html','reader.js','register-sw.js','pdf.min.js','pdf.worker.min.js','manifest.webmanifest',
   'icons/32.png','icons/192.png','icons/512.png','icons/maskable-512.png','icons/apple-touch-icon.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });

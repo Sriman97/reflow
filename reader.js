@@ -1,5 +1,5 @@
 /* ==CORE-START== : PDF → reflowable blocks */
-const CORE_VERSION = 7;
+const CORE_VERSION = 9;
 
 function median(a){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[b.length>>1]; }
 function pct(a,p){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[Math.min(b.length-1,Math.floor(p*b.length))]; }
@@ -20,6 +20,14 @@ async function extractPages(pdf, onProg){
       try{ const st=tc.styles&&tc.styles[fn]; if(st && /bold|black|heavy/i.test(st.fontFamily||'')) bo=true; }catch(e){}
       return boldOf[fn]=bo;
     };
+    const italOf={};
+    const isItal = fn => {
+      if(fn in italOf) return italOf[fn];
+      let r=false;
+      try{ if(page.commonObjs.has(fn)){ const f=page.commonObjs.get(fn); r=!!(f.italic||/italic|oblique|-it$|-ital/i.test(f.name||'')); } }catch(e){}
+      try{ const st=tc.styles&&tc.styles[fn]; if(st && /italic|oblique/i.test(st.fontFamily||'')) r=true; }catch(e){}
+      return italOf[fn]=r;
+    };
     const items=[];
     for(const it of tc.items){
       if(!it.str || !it.str.trim()) continue;
@@ -27,7 +35,7 @@ async function extractPages(pdf, onProg){
       if(Math.abs(b) > 0.05*Math.abs(a) || a<=0) continue;          // skip rotated text
       const size = Math.hypot(c,d) || it.height;
       if(size < 1) continue;
-      items.push({s:it.str, x:e-vx0, y:f-vy0, w:it.width, size, b:isBold(it.fontName)});
+      items.push({s:it.str, x:e-vx0, y:f-vy0, w:it.width, size, b:isBold(it.fontName), i:isItal(it.fontName)||Math.abs(c)>0.12*Math.abs(d)});
     }
     let fig=false;
     try{
@@ -68,6 +76,10 @@ function splitColumns(items, pw){
   return [items];
 }
 
+// Inline style markers: \uE000/\uE001 italic, \uE002/\uE003 bold.
+const MARKS=/[\uE000-\uE003]/g;
+function collapseMarks(r){ return r.replace(/\uE001(\s*)\uE000/g,'$1').replace(/\uE003(\s*)\uE002/g,'$1').replace(/\uE000(\s*)\uE001/g,'$1').replace(/\uE002(\s*)\uE003/g,'$1'); }
+
 // Group text items into lines (same baseline), left to right.
 function itemsToLines(items){
   items = [...items].sort((a,b)=>(b.y-a.y)||(a.x-b.x));
@@ -83,18 +95,20 @@ function itemsToLines(items){
   }
   for(const L of lines){
     L.items.sort((a,b)=>a.x-b.x);
-    let t='', lastX1=null, boldC=0, allC=0; const cnt={};
+    let t='', raw='', lastX1=null, boldC=0, allC=0; const cnt={};
+    for(const it of L.items){ allC+=it.s.length; if(it.b) boldC+=it.s.length; }
+    L.bold = allC>0 && boldC/allC > 0.6;
     for(const it of L.items){
       if(lastX1!==null){
         const gap=it.x-lastX1;
-        if(gap > it.size*0.15 && !/\s$/.test(t) && !/^\s/.test(it.s)) t+=' ';
+        if(gap > it.size*0.15 && !/\s$/.test(t) && !/^\s/.test(it.s)){ t+=' '; raw+=' '; }
       }
       t+=it.s;
+      raw += it.i ? '\uE000'+it.s+'\uE001' : (it.b && !L.bold ? '\uE002'+it.s+'\uE003' : it.s);
       lastX1 = Math.max(lastX1===null?-1e9:lastX1, it.x+it.w);
       const k=Math.round(it.size*2)/2; cnt[k]=(cnt[k]||0)+it.s.length;
-      allC+=it.s.length; if(it.b) boldC+=it.s.length;
     }
-    L.bold = allC>0 && boldC/allC > 0.6;
+    L.raw=collapseMarks(raw.replace(/\s+/g,' ')).trim();
     L.text=t.replace(/\s+/g,' ').trim();
     L.x0=L.items[0].x; L.x1=lastX1;
     L.size=+Object.entries(cnt).sort((a,b)=>b[1]-a[1])[0][0];
@@ -140,16 +154,33 @@ function buildBlocks(pages){
   const blocks=[]; let cur=null; const pendingFigs=[];
   const terminal=/[.!?:"”’»)\]]$/;
   const flush=()=>{
-    if(cur){ cur.text=cur.text.trim(); if(cur.text) blocks.push(cur); cur=null; }
+    if(cur){
+      const head = cur.t==='h1'||cur.t==='h2';
+      const txt = head ? cur.text.trim() : collapseMarks(cur.raw||'').trim();
+      if(cur.text.trim()){ cur.text=txt; delete cur.raw; delete cur.x; delete cur.n; blocks.push(cur); }
+      cur=null;
+    }
     while(pendingFigs.length) blocks.push({t:'chip', page:pendingFigs.shift()});
   };
-  const append=(L)=>{
-    const t=L.text;
-    if(!cur.text){ cur.text=t; return; }
-    if(/[A-Za-zÀ-ɏ]-$/.test(cur.text) && /^[a-zß-ÿ]/.test(t)) cur.text=cur.text.slice(0,-1)+t;
-    else if(/[­¬]$/.test(cur.text)) cur.text=cur.text.slice(0,-1)+t;
-    else cur.text+=' '+t;
+  const append=(L,t=L.text,r=L.raw)=>{
+    if(cur.raw===undefined) cur.raw='';
+    cur.n=(cur.n||0)+1;
+    if(!cur.text){ cur.text=t; cur.raw=r; return; }
+    if((/[A-Za-zÀ-ɏ]-$/.test(cur.text) && /^[a-zß-ÿ]/.test(t)) || /[­¬]$/.test(cur.text)){
+      cur.text=cur.text.slice(0,-1)+t;
+      cur.raw=cur.raw.replace(/[-­¬]([\uE000-\uE003]*)$/,'$1')+r;
+    } else { cur.text+=' '+t; cur.raw+=' '+r; }
   };
+  const listRe=/^(\(?\d{1,3}[.)]|\(?[a-h][.)]|\(?[A-H]\)|\(?[ivx]{1,4}[.)]|\([ivxlc]{1,5}\)|[•●▪◦■‣⁃○–—-])\s+(?=\S)/;
+
+  // Typical first-line paragraph indent (from body lines).
+  const offs=[];
+  for(const pg of pages) for(const c of pg.cols){
+    const ref=c.filter(L=>!L.drop && near(L.size)); if(ref.length<3) continue;
+    const lf=pct(ref.map(L=>L.x0),0.15);
+    for(const L of ref){ const o=L.x0-lf; if(o>body*0.6 && o<body*4) offs.push(o); }
+  }
+  const paraIndent = median(offs) || body*1.5;
 
   const chapRe=/^(chapter|part|book|appendix|prologue|epilogue|introduction|preface|foreword|afterword|conclusion|epigraph|acknowledg\w*|bibliography|glossary|index|contents)\b/i;
   const numRe=/^((chapter|part|book|section)\s+)?([0-9]{1,3}|[ivxlc]{1,7}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty[\w-]*|thirty[\w-]*|forty[\w-]*|fifty[\w-]*)\.?$/i;
@@ -192,13 +223,48 @@ function buildBlocks(pages){
           const isHead = cur && (cur.t==='h1'||cur.t==='h2') && cur.page===pi && prev;
           const dist = isHead ? (prev.y-L.y) : 1e9;
           if(isHead && Math.abs(prev.size-L.size)<0.6 && dist < L.size*2.2 && !numRe.test(cur.text) && (cur.t===kind || cur.text.includes(': '))) append(L);
-          else if(isHead && !cur.text.includes(': ') && dist < Math.max(L.size,prev.size)*4 && (numRe.test(cur.text) || (chapRe.test(cur.text) && words(cur.text)<=3))){ cur.text+=': '+L.text; cur.t='h1'; }
+          else if(isHead && !cur.text.includes(': ') && dist < Math.max(L.size,prev.size)*4 && (numRe.test(cur.text) || (chapRe.test(cur.text) && words(cur.text)<=3))){ cur.text+=': '+L.text; cur.raw+=': '+L.raw; cur.t='h1'; }
           else { flush(); cur={t:kind,text:'',page:pi}; append(L); }
           prev=L; continue;
         }
+        // Lists, indented blocks, centered lines.
+        const off=L.x0-left;
+        const gapOK = prev && gapB <= lead*1.45 && gapB >= 0;
+        const prevEnded = !prev || !gapOK || terminal.test(prev.text) || prev.x1 < right - body*2;
+        const hyphenCont = prev && gapOK && /[A-Za-z]-$/.test(prev.text) && /^[a-z]/.test(L.text);
+        const lm = !hyphenCont && L.text.match(listRe);
+        const lvlOf = o => o < body*0.8 ? 0 : (o < paraIndent + body*2.4 ? 1 : 2);
+        if(lm && prevEnded){
+          flush();
+          const mk=lm[1], at=L.raw.indexOf(mk);
+          const rest = at>=0 ? (L.raw.slice(0,at)+L.raw.slice(at+mk.length)).replace(/^([\uE000-\uE003]*)\s+/,'$1') : L.text.slice(lm[0].length);
+          cur={t:'li', mk, lvl:lvlOf(off), x:L.x0, text:'', page:pi}; append(L, L.text.slice(lm[0].length), rest);
+          prev=L; continue;
+        }
+        const pageStart = !prev && cur && cur.page<pi && !terminal.test(cur.text);
+        if(cur && cur.t==='li' && !lm && ((gapOK && L.x0 > cur.x - body*0.4 && !(prev.x1 < right - body*2.5 && terminal.test(prev.text) && L.x0 > cur.x + body*1.2)) || (pageStart && L.x0 > cur.x + body*0.4))){
+          append(L); prev=L; continue;
+        }
+        const centered = (L.x1-L.x0) < colW*0.72 && off > body*2 && (right-L.x1) > body*2 && Math.abs((L.x0+L.x1)/2-(left+right)/2) < body*1.2 && L.text.length < 80;
+        if(centered && !hyphenCont){
+          if(cur && cur.t==='c' && gapOK){ cur.text+='\n'+L.text; cur.raw+='\n'+L.raw; }
+          else { flush(); cur={t:'c', text:'', page:pi}; append(L); }
+          prev=L; continue;
+        }
+        const deep = off > paraIndent + body*0.8 && off < colW*0.6;
+        if(deep || (cur && cur.t==='q' && gapOK && L.x0 > cur.x - body*1.5 && !prevEnded)){
+          const cont = cur && cur.t==='q' && gapOK && (hyphenCont || (!prevEnded && L.x0 <= cur.x + body*0.6) || (Math.abs(L.x0-cur.x) < body*0.6 && !(prev.x1 < right - body*2.5 && terminal.test(prev.text))));
+          if(cont && prev && prev.x1 < right - body*4 && Math.abs(L.x0-cur.x) < body*0.6 && !hyphenCont){ cur.text+='\n'+L.text; cur.raw+='\n'+L.raw; cur.n++; }
+          else if(cont){ append(L); cur.x=Math.min(cur.x,L.x0); }
+          else { flush(); cur={t:'q', lvl:lvlOf(off)>=2?2:1, x:L.x0, text:'', page:pi}; append(L); }
+          prev=L; continue;
+        }
+        if(cur && cur.t==='q' && cur.n===1 && gapOK && off < body*0.5 && !prevEnded){
+          cur.t='p'; cur.ind=1; delete cur.lvl; append(L); prev=L; continue;   // chapter openers: deep first line, then normal text
+        }
         let brk=false;
         if(!cur || cur.t!=='p') brk=true;
-        else if(prev && /[A-Za-z]-$/.test(prev.text) && /^[a-z]/.test(L.text)) brk=false;
+        else if(hyphenCont) brk=false;
         else if(prev){
           if(gapB > lead*1.45 || gapB < 0) brk=true;
           else if(indented(L)) brk=true;
@@ -208,7 +274,7 @@ function buildBlocks(pages){
         } else {
           if(indented(L) || (terminal.test(cur.text) && !/^[a-z]/.test(L.text))) brk=true;
         }
-        if(brk){ flush(); cur={t:'p',text:'',page:pi}; if(L.size < body*0.85) cur.small=true; }
+        if(brk){ flush(); cur={t:'p',text:'',page:pi}; if(indented(L)) cur.ind=1; if(L.size < body*0.85) cur.small=true; }
         append(L); prev=L;
       }
     }
@@ -256,6 +322,19 @@ const content=$('content'), viewport=$('viewport');
 function showLoading(msg,frac){ $('load').classList.remove('hidden'); $('loadMsg').textContent=msg; $('loadBar').style.width=((frac||0)*100)+'%'; }
 function hideLoading(){ $('load').classList.add('hidden'); }
 function esc(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// Text with inline style markers -> safe HTML.
+function fmt(t){
+  let it=0, bo=0;
+  let h=esc(t).replace(/[\uE000-\uE003]/g,m=>{
+    if(m==='\uE000'){ if(it) return ''; it=1; return '<em>'; }
+    if(m==='\uE001'){ if(!it) return ''; it=0; return '</em>'; }
+    if(m==='\uE002'){ if(bo) return ''; bo=1; return '<strong>'; }
+    if(!bo) return ''; bo=0; return '</strong>';
+  });
+  if(it) h+='</em>'; if(bo) h+='</strong>';
+  return h.replace(/\n/g,'<br>');
+}
+const plain = t => (t||'').replace(/[\uE000-\uE003]/g,'');
 
 /* ---------- library ---------- */
 async function renderLibrary(){
@@ -306,6 +385,7 @@ async function openBook(id,name,buf){
     S.id=id; S.name=name; S.blocks=cache.blocks; S.toc=cache.toc;
     S.meta = (await DB.get('meta',id)) || {id,name,pos:0,pct:0};
     S.meta.opened=Date.now(); DB.put('meta',S.meta);
+    { const ps=S.blocks.filter(b=>b.t==='p'&&!b.small); S.blockStyle = ps.length>20 && ps.filter(b=>b.ind).length < ps.length*0.25; }
     S.cum=[]; let c=0; for(const b of S.blocks){ S.cum.push(c); c+= b.text? b.text.length : 400; } S.total=Math.max(1,c);
     buildSections();
     $('lib').classList.add('hidden'); $('reader').classList.remove('hidden'); hideLoading();
@@ -368,6 +448,7 @@ function applySettings(relayout=true){
 }
 
 function layoutDims(){
+  content.classList.toggle('blk', !!S.blockStyle);
   const m=+S.set.margin, top=40, bot=38;
   S.W=Math.floor(window.innerWidth-2*m); S.H=Math.floor(window.innerHeight-top-bot);
   if(isScroll()){
@@ -387,8 +468,10 @@ function blockHTML(b,i){
   if(b.t==='h1'||b.t==='h2') return `<${b.t} data-i="${i}">${esc(b.text)}</${b.t}>`;
   if(b.t==='img'){ const {w,h}=figSize(b.ar); return `<div class="fig" data-i="${i}" data-p="${b.page}" style="width:${w}px;height:${h}px"></div>`; }
   if(b.t==='chip') return `<div class="chip" data-i="${i}" data-p="${b.page}">▣ Figure on page ${b.page+1}. Tap to see the original page.</div>`;
-  const pt=i>0?S.blocks[i-1].t:'h1';
-  return `<p data-i="${i}" class="${pt!=='p'?'first':''}${b.small?' small':''}">${esc(b.text)}</p>`;
+  if(b.t==='li') return `<div class="li l${b.lvl||0}" data-i="${i}"><span class="mk">${esc(b.mk)}</span><div class="lt">${fmt(b.text)}</div></div>`;
+  if(b.t==='q') return `<p class="q l${b.lvl||1}" data-i="${i}">${fmt(b.text)}</p>`;
+  if(b.t==='c') return `<p class="c" data-i="${i}">${fmt(b.text)}</p>`;
+  return `<p data-i="${i}" class="${b.ind?'':'ni'}${b.small?' small':''}">${fmt(b.text)}</p>`;
 }
 
 let figToken=0;
@@ -452,7 +535,7 @@ function saveNow(){ clearTimeout(saveT); if(S.meta) return DB.put('meta',S.meta)
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) saveNow(); });
 window.addEventListener('pagehide',saveNow);
 function progress(){ if(isScroll()){ const mx=viewport.scrollHeight-viewport.clientHeight; return mx>0? Math.min(1,viewport.scrollTop/mx) : 0; } const [a,b]=S.sec[S.si]; const s0=S.cum[a], s1=b<S.cum.length?S.cum[b]:S.total; return Math.min(1,(s0+(s1-s0)*(S.page/Math.max(1,S.pages)))/S.total); }
-function chapterTitle(){ let t=''; for(const e of S.toc){ if(e.block<=S.pos) t=e.title; else break; } return t; }
+function chapterTitle(){ let t=''; for(const e of S.toc){ if(e.block<=S.pos) t=e.title; else break; } return plain(t); }
 function updateLabels(){
   const pc=Math.round(progress()*100);
   const left=S.pages-1-S.page;
@@ -572,7 +655,7 @@ $('oPrev').onclick=()=>origGo(-1); $('oNext').onclick=()=>origGo(1);
 $('oZi').onclick=()=>{ O.zoom=Math.min(4,O.zoom*1.4); renderOrig(); };
 $('oZo').onclick=()=>{ O.zoom=Math.max(0.6,O.zoom/1.4); renderOrig(); };
 
-/* ---------- extension extras ---------- */
+/* ---------- app extras ---------- */
 if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc='pdf.worker.min.js';   // real background worker
 document.addEventListener('dragover',e=>{ e.preventDefault(); });
 document.addEventListener('drop',e=>{
