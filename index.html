@@ -67,7 +67,11 @@ button.primary,label.primary{background:var(--accent);color:#fff;border:none}
 #content sup,#content sub{font-size:.66em;line-height:0;position:relative}
 #content sup{vertical-align:baseline;top:-.55em}#content sub{vertical-align:baseline;top:.25em}
 #content a{color:var(--accent);text-decoration:none;cursor:pointer}
-#content a.il{padding:.35em .2em;margin:-.35em -.05em}
+#content a.il{position:relative;font-weight:600;padding:0 .12em;border-radius:4px;background:rgba(194,65,12,.10)}
+#content a.il::after{content:'';position:absolute;left:-12px;right:-12px;top:-14px;bottom:-14px}   /* finger-sized tap area */
+body.dark #content a.il{background:rgba(251,146,60,.16)}
+#content .hit{animation:hit 2.4s ease-out}
+@keyframes hit{0%,35%{background:rgba(194,65,12,.18)}100%{background:transparent}}
 #content a.xl{text-decoration:underline;text-underline-offset:2px}
 #backPill{position:fixed;left:50%;transform:translateX(-50%);bottom:max(46px,calc(env(safe-area-inset-bottom) + 40px));z-index:12;background:var(--fg);color:var(--bg);border:none;border-radius:999px;padding:9px 16px;font:500 13px Inter,system-ui,sans-serif;box-shadow:0 4px 18px #0003}
 #content p.small{font-size:.84em;line-height:1.45;margin:.3em 0}
@@ -118,7 +122,7 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
   <input id="file" type="file" accept="application/pdf,.pdf" class="hidden">
   <div id="books"></div>
   <p class="note">Tip: you can also drop a PDF anywhere on this page. Your books stay on this device, in this browser. Nothing is uploaded. Best results: text-based PDFs (not scans) with one or two columns. Figures show as a link to the original page.</p>
-  <p class="note" style="margin-top:8px">Version 20261109-1959</p>
+  <p class="note" style="margin-top:8px">Version 20261109-2003</p>
 </div>
 
 <div id="load" class="hidden"><div class="msg" id="loadMsg">Opening…</div><div class="pb"><i id="loadBar"></i></div></div>

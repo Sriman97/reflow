@@ -636,11 +636,26 @@ function linkTarget(to){
   }
   return first>=0?first:S.blocks.length-1;
 }
+// A tap close to a small footnote number counts as a tap on it.
+function nearestLink(x,y,maxD){
+  let best=null, bd=maxD;
+  const vr=viewport.getBoundingClientRect();
+  for(const a of content.querySelectorAll('a.il')){
+    for(const r of a.getClientRects()){
+      if(r.right<vr.left || r.left>vr.right || r.bottom<vr.top || r.top>vr.bottom) continue;
+      const dx=Math.max(r.left-x,0,x-r.right), dy=Math.max(r.top-y,0,y-r.bottom), d=Math.hypot(dx,dy);
+      if(d<bd){ bd=d; best=a; }
+    }
+  }
+  return best;
+}
 function followLink(to){
   const i=linkTarget(to); if(i<0) return;
   backStack.push({pos:S.pos, off:S.off}); if(backStack.length>20) backStack.shift();
   $('backPill').classList.remove('hidden');
   hideBars(); show(i,0);
+  const el=content.querySelector(`[data-i="${i}"]`);   // show which note it is
+  if(el){ el.classList.remove('hit'); void el.offsetWidth; el.classList.add('hit'); }
 }
 $('backPill').addEventListener('click',e=>{
   e.stopPropagation();
@@ -682,7 +697,8 @@ stage.addEventListener('click',e=>{
   if(Date.now()-swipedAt<450) return;
   const sel=window.getSelection&&window.getSelection(); if(sel && String(sel).trim()) return;
   const xl=e.target.closest('a.xl'); if(xl) return;   // web link: let the browser open it
-  const il=e.target.closest('a.il'); if(il){ e.preventDefault(); followLink(il.dataset.to); return; }
+  const il=e.target.closest('a.il') || nearestLink(e.clientX,e.clientY,30);
+  if(il){ e.preventDefault(); followLink(il.dataset.to); return; }
   const fig=e.target.closest('.chip,.fig'); if(fig){ openOriginal(+fig.dataset.p); return; }
   const x=e.clientX/window.innerWidth;
   if(x<0.3) prev(); else if(x>0.7) next(); else toggleBars();
