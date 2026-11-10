@@ -15,6 +15,8 @@ Reflow rebuilds paragraphs, headings and chapters from a PDF, so you can change 
 - Themes: light, sepia, paper (e-ink look, optional page flash), dark
 - Contents from the PDF outline plus detected chapters
 - Original-page view with zoom; figures link to their page
+- Long-press a word for its definition (Free Dictionary API / Wiktionary; cached for offline)
+- Tappable footnotes with Back, superscripts, lists, quotes, italics
 - Library with saved reading position
 
 ## Files

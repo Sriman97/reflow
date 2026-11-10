@@ -365,7 +365,7 @@ const $=id=>document.getElementById(id);
 const GAP=60;
 const FONTS={serif:"'Literata',Georgia,serif", georgia:"Georgia,'Times New Roman',serif", sans:"'Inter',system-ui,sans-serif"};
 const S={ id:null, name:'', pdf:null, blocks:[], toc:[], cum:[], total:1, sec:[], si:0, page:0, pages:1, pos:0, W:300, H:500, meta:null,
-  set:Object.assign({size:19,font:'serif',lh:'1.55',margin:'24',align:'justify',theme:'light',flash:'off',mode:'pages'}, LS.get('reflow.settings',{})) };
+  set:Object.assign({size:19,font:'serif',lh:'1.55',margin:'24',align:'justify',theme:'light',flash:'off',mode:'pages',dict:'app'}, LS.get('reflow.settings',{})) };
 const content=$('content'), viewport=$('viewport');
 
 function showLoading(msg,frac){ $('load').classList.remove('hidden'); $('loadMsg').textContent=msg; $('loadBar').style.width=((frac||0)*100)+'%'; }
@@ -507,7 +507,7 @@ function applySettings(relayout=true){
   const s=S.set, r=document.documentElement.style;
   r.setProperty('--fs',s.size+'px'); r.setProperty('--lh',s.lh); r.setProperty('--ff',FONTS[s.font]||FONTS.serif);
   r.setProperty('--ta',s.align); r.setProperty('--m',s.margin+'px');
-  document.body.className=s.theme==='light'?'':s.theme;
+  document.body.className=(s.theme==='light'?'':s.theme)+(s.dict==='ios'?' nativesel':'');
   document.querySelectorAll('#sAa .seg[data-k]').forEach(g=>g.querySelectorAll('button').forEach(b=>b.classList.toggle('on', String(s[g.dataset.k])===b.dataset.v)));
   LS.set('reflow.settings',s);
   if(relayout && S.blocks.length) show(S.pos,S.off);
@@ -623,6 +623,100 @@ function next(){ if(isScroll()){ viewport.scrollBy({top:S.H*0.9,behavior:'smooth
 function prev(){ if(isScroll()){ viewport.scrollBy({top:-S.H*0.9,behavior:'smooth'}); hideBars(); return; } inkFlash(); if(S.page>0) goPage(S.page-1); else if(S.si>0) renderSection(S.si-1,{last:true}); hideBars(); }
 function isScroll(){ return S.set.mode==='scroll'; }
 
+/* ---------- dictionary (long-press a word) ---------- */
+const WORD_CH=/[\p{L}\p{M}’'\-]/u;
+function caretAt(x,y){
+  if(document.caretRangeFromPoint){ const r=document.caretRangeFromPoint(x,y); return r&&{node:r.startContainer,off:r.startOffset}; }
+  if(document.caretPositionFromPoint){ const p=document.caretPositionFromPoint(x,y); return p&&{node:p.offsetNode,off:p.offset}; }
+  return null;
+}
+function wordAt(x,y){
+  const c=caretAt(x,y); if(!c||!c.node||c.node.nodeType!==3||!content.contains(c.node)) return null;
+  const t=c.node.data; let a=c.off;
+  if(!WORD_CH.test(t[a]||'') && a>0 && WORD_CH.test(t[a-1])) a--;
+  if(!WORD_CH.test(t[a]||'')) return null;
+  let b=a; while(a>0 && WORD_CH.test(t[a-1])) a--; while(b<t.length && WORD_CH.test(t[b])) b++;
+  while(a<b && /[’'\-]/.test(t[a])) a++; while(b>a && /[’'\-]/.test(t[b-1])) b--;
+  const w=t.slice(a,b); if(!/\p{L}/u.test(w)) return null;
+  const r=document.createRange(); r.setStart(c.node,a); r.setEnd(c.node,b);
+  const rects=[...r.getClientRects()]; const rect=rects.find(q=>x>=q.left-8&&x<=q.right+8&&y>=q.top-8&&y<=q.bottom+8);
+  if(!rect) return null;
+  return {word:w, rect};
+}
+function stems(w){
+  w=w.toLowerCase().replace(/’/g,"'").replace(/'s$/,'');
+  const c=[w], E=(re,f)=>{ if(re.test(w)) c.push(f()); };
+  E(/ies$/,()=>w.slice(0,-3)+'y'); E(/(ss|x|ch|sh|o)es$/,()=>w.slice(0,-2)); E(/[^s]s$/,()=>w.slice(0,-1));
+  E(/ied$/,()=>w.slice(0,-3)+'y'); E(/ed$/,()=>w.slice(0,-2)); E(/ed$/,()=>w.slice(0,-1)); E(/(.)\1ed$/,()=>w.slice(0,-3));
+  E(/ing$/,()=>w.slice(0,-3)); E(/ing$/,()=>w.slice(0,-3)+'e'); E(/(.)\1ing$/,()=>w.slice(0,-4));
+  E(/ily$/,()=>w.slice(0,-3)+'y'); E(/ly$/,()=>w.slice(0,-2)); E(/er$/,()=>w.slice(0,-2)); E(/est$/,()=>w.slice(0,-3));
+  if(w.includes('-')) c.push(...w.split('-'));
+  return [...new Set(c)].filter(x=>x.length>1);
+}
+const dictCache=LS.get('reflow.dict',{});
+function cachePut(k,v){ dictCache[k]=v; const ks=Object.keys(dictCache); if(ks.length>400) delete dictCache[ks[0]]; LS.set('reflow.dict',dictCache); }
+async function freeDict(w){
+  const r=await fetch('https://api.dictionaryapi.dev/api/v2/entries/en/'+encodeURIComponent(w));
+  if(r.status===404) return null; if(!r.ok) throw new Error('http '+r.status);
+  const j=await r.json(); const e=j[0]; if(!e) return null;
+  const senses=[]; let audio=null, phon=e.phonetic||'';
+  for(const x of j) for(const p of (x.phonetics||[])){ if(!audio&&p.audio) audio=p.audio; if(!phon&&p.text) phon=p.text; }
+  for(const x of j) for(const m of (x.meanings||[])){
+    let s=senses.find(q=>q.pos===m.partOfSpeech); if(!s){ s={pos:m.partOfSpeech,defs:[]}; senses.push(s); }
+    for(const d of (m.definitions||[])) if(s.defs.length<3) s.defs.push({d:d.definition, ex:d.example||''});
+  }
+  return {word:e.word, phon, audio, senses:senses.slice(0,4), src:'Wiktionary, via Free Dictionary API', url:'https://en.wiktionary.org/wiki/'+encodeURIComponent(e.word)};
+}
+async function wiktionary(w){
+  const r=await fetch('https://en.wiktionary.org/api/rest_v1/page/definition/'+encodeURIComponent(w));
+  if(r.status===404) return null; if(!r.ok) throw new Error('http '+r.status);
+  const j=await r.json(); const en=j.en; if(!en||!en.length) return null;
+  const txt=h=>{ const d=new DOMParser().parseFromString(h||'','text/html'); return (d.body.textContent||'').trim(); };
+  const senses=en.slice(0,4).map(x=>({pos:(x.partOfSpeech||'').toLowerCase(), defs:(x.definitions||[]).map(d=>({d:txt(d.definition), ex:d.examples&&d.examples[0]?txt(d.examples[0]):''})).filter(d=>d.d).slice(0,3)})).filter(x=>x.defs.length);
+  return senses.length? {word:w, phon:'', audio:null, senses, src:'Wiktionary', url:'https://en.wiktionary.org/wiki/'+encodeURIComponent(w)} : null;
+}
+async function define(word){
+  const tries=stems(word); let netErr=false;
+  for(const w of tries){
+    if(dictCache[w]!==undefined){ if(dictCache[w]) return dictCache[w]; continue; }
+    for(const src of [freeDict, wiktionary]){
+      try{ const r=await src(w); if(r){ cachePut(w,r); return r; } }catch(e){ netErr=true; }
+    }
+    if(!netErr) cachePut(w,null);
+  }
+  return netErr ? {error:'net'} : null;
+}
+let dictTok=0;
+async function lookup(hit){
+  const m=$('wordMark'); const r=hit.rect;
+  m.style.cssText=`left:${r.left-2}px;top:${r.top-1}px;width:${r.width+4}px;height:${r.height+2}px`; m.classList.remove('hidden');
+  hideBars(); $('scrim').classList.remove('hidden'); $('dict').classList.remove('hidden');
+  const body=$('dictBody'), tok=++dictTok;
+  body.innerHTML=`<div class="hd"><p class="w">${esc(hit.word)}</p></div><p class="msg">Looking up…</p>`;
+  const d=await define(hit.word); if(tok!==dictTok) return;
+  if(!d || d.error){
+    body.innerHTML=`<div class="hd"><p class="w">${esc(hit.word)}</p></div><p class="msg">${d&&d.error ? 'No connection to the dictionary. Words you looked up before still work offline.' : 'No definition found for this word.'}</p>
+      <p class="src"><a href="https://en.wiktionary.org/wiki/${encodeURIComponent(hit.word.toLowerCase())}" target="_blank" rel="noopener">Search Wiktionary</a></p>`;
+    return;
+  }
+  body.innerHTML=`<div class="hd"><p class="w">${esc(d.word)}</p>${d.audio?'<button id="dictSay" title="Pronounce">🔊</button>':''}</div>
+    ${d.phon?`<p class="ph">${esc(d.phon)}</p>`:''}
+    ${d.senses.map(s=>`<p class="pos">${esc(s.pos)}</p><ol>${s.defs.map(x=>`<li>${esc(x.d)}${x.ex?` <span class="ex">“${esc(x.ex)}”</span>`:''}</li>`).join('')}</ol>`).join('')}
+    <p class="src">Source: ${esc(d.src)} (CC BY-SA). <a href="${esc(d.url)}" target="_blank" rel="noopener">More on Wiktionary</a></p>`;
+  const say=$('dictSay'); if(say) say.onclick=()=>{ try{ new Audio(d.audio).play().catch(()=>{}); }catch(e){} };
+}
+var lpFired=0; let lpT=null, lpAt=null;
+const ownDict=()=>S.set.dict!=='ios';
+$('stage').addEventListener('touchstart',e=>{
+  if(e.touches.length!==1) return; const t=e.touches[0]; lpAt={x:t.clientX,y:t.clientY};
+  clearTimeout(lpT); if(!ownDict()) return; lpT=setTimeout(()=>{ const w=wordAt(lpAt.x,lpAt.y); if(w){ lpFired=Date.now(); lookup(w); } },450);
+},{passive:true});
+$('stage').addEventListener('touchmove',e=>{ if(lpAt && e.touches[0] && Math.hypot(e.touches[0].clientX-lpAt.x,e.touches[0].clientY-lpAt.y)>10) clearTimeout(lpT); },{passive:true});
+$('stage').addEventListener('touchend',()=>clearTimeout(lpT),{passive:true});
+$('stage').addEventListener('touchcancel',()=>clearTimeout(lpT),{passive:true});
+$('stage').addEventListener('contextmenu',e=>{ if(!ownDict()) return; e.preventDefault(); if(Date.now()-lpFired<800) return; const w=wordAt(e.clientX,e.clientY); if(w){ lpFired=Date.now(); lookup(w); } });
+content.addEventListener('dblclick',e=>{ if(!ownDict()) return; const w=wordAt(e.clientX,e.clientY); if(w){ lpFired=Date.now(); lookup(w); } });
+
 /* ---------- internal links (footnotes) ---------- */
 const backStack=[];
 function linkTarget(to){
@@ -649,9 +743,10 @@ function nearestLink(x,y,maxD){
   }
   return best;
 }
-function followLink(to){
+function followLink(to, src){
   const i=linkTarget(to); if(i<0) return;
-  backStack.push({pos:S.pos, off:S.off}); if(backStack.length>20) backStack.shift();
+  const from=src && src.closest('[data-i]');
+  backStack.push({pos:S.pos, off:S.off, block: from? +from.dataset.i : null, to}); if(backStack.length>20) backStack.shift();
   $('backPill').classList.remove('hidden');
   hideBars(); show(i,0);
   const el=content.querySelector(`[data-i="${i}"]`);   // show which note it is
@@ -659,7 +754,12 @@ function followLink(to){
 }
 $('backPill').addEventListener('click',e=>{
   e.stopPropagation();
-  const b=backStack.pop(); if(b) show(b.pos,b.off);
+  const b=backStack.pop();
+  if(b){
+    if(b.block!=null) show(b.block,0); else show(b.pos,b.off);   // the page that holds the footnote number
+    const a=b.block!=null && content.querySelector(`[data-i="${b.block}"] a.il[data-to="${CSS.escape(b.to)}"]`);
+    if(a){ a.classList.remove('hitlink'); void a.offsetWidth; a.classList.add('hitlink'); }
+  }
   if(!backStack.length) $('backPill').classList.add('hidden');
 });
 function show(block,off){ if(isScroll()) renderScroll(block); else renderSection(secOf(block),{block,off}); }
@@ -694,11 +794,11 @@ stage.addEventListener('touchend',e=>{
   if(Math.abs(dx)>45 && Math.abs(dx)>Math.abs(dy)*1.4){ swipedAt=Date.now(); dx<0?next():prev(); }
 });
 stage.addEventListener('click',e=>{
-  if(Date.now()-swipedAt<450) return;
+  if(Date.now()-swipedAt<450 || Date.now()-lpFired<700) return;
   const sel=window.getSelection&&window.getSelection(); if(sel && String(sel).trim()) return;
   const xl=e.target.closest('a.xl'); if(xl) return;   // web link: let the browser open it
   const il=e.target.closest('a.il') || nearestLink(e.clientX,e.clientY,30);
-  if(il){ e.preventDefault(); followLink(il.dataset.to); return; }
+  if(il){ e.preventDefault(); followLink(il.dataset.to, il); return; }
   const fig=e.target.closest('.chip,.fig'); if(fig){ openOriginal(+fig.dataset.p); return; }
   const x=e.clientX/window.innerWidth;
   if(x<0.3) prev(); else if(x>0.7) next(); else toggleBars();
@@ -714,8 +814,8 @@ let rz=null; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTime
 function toggleBars(){ const off=$('top').classList.contains('off'); $('top').classList.toggle('off',!off); $('bot').classList.toggle('off',!off); }
 function hideBars(){ $('top').classList.add('off'); $('bot').classList.add('off'); }
 function openSheet(id){ $('scrim').classList.remove('hidden'); $(id).classList.remove('hidden'); }
-function closeSheets(){ $('scrim').classList.add('hidden'); $('sAa').classList.add('hidden'); $('sToc').classList.add('hidden'); }
-$('scrim').onclick=closeSheets;
+function closeSheets(){ $('scrim').classList.add('hidden'); $('sAa').classList.add('hidden'); $('sToc').classList.add('hidden'); $('dict').classList.add('hidden'); $('wordMark').classList.add('hidden'); }
+$('scrim').onclick=()=>{ if(Date.now()-lpFired<800) return; closeSheets(); };   // ignore the tap that ends a long press
 $('bLib').onclick=async()=>{ hideBars(); await saveNow(); $('reader').classList.add('hidden'); $('lib').classList.remove('hidden'); renderLibrary(); };
 $('bAa').onclick=()=>openSheet('sAa');
 $('bToc').onclick=()=>{

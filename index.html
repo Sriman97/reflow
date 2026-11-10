@@ -70,8 +70,24 @@ button.primary,label.primary{background:var(--accent);color:#fff;border:none}
 #content a.il{position:relative;font-weight:600;padding:0 .12em;border-radius:4px;background:rgba(194,65,12,.10)}
 #content a.il::after{content:'';position:absolute;left:-12px;right:-12px;top:-14px;bottom:-14px}   /* finger-sized tap area */
 body.dark #content a.il{background:rgba(251,146,60,.16)}
-#content .hit{animation:hit 2.4s ease-out}
-@keyframes hit{0%,35%{background:rgba(194,65,12,.18)}100%{background:transparent}}
+#content .hit{animation:hit 3.2s ease-out;border-radius:6px}
+@keyframes hit{0%,45%{background:rgba(194,65,12,.24);box-shadow:0 0 0 4px rgba(194,65,12,.24)}100%{background:transparent;box-shadow:0 0 0 4px transparent}}
+#content a.il.hitlink{animation:hitlink 2.6s ease-out}
+@keyframes hitlink{0%,50%{background:var(--accent);color:var(--bg);box-shadow:0 0 0 5px rgba(194,65,12,.35)}100%{box-shadow:0 0 0 5px transparent}}
+#content{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+body.nativesel #content{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+#wordMark{position:fixed;background:rgba(194,65,12,.25);border-radius:4px;pointer-events:none;z-index:9}
+#dict .w{font:600 24px var(--ff);margin:0}
+#dict .ph{color:var(--muted);font-size:14px;margin:4px 0 0}
+#dict .pos{font:italic 14px var(--ff);color:var(--muted);margin:16px 0 4px}
+#dict ol{margin:0;padding-left:1.3em;font:16px/1.5 var(--ff)}
+#dict li{margin:6px 0}
+#dict .ex{color:var(--muted);font-style:italic}
+#dict .src{font-size:11px;color:var(--muted);margin-top:16px;line-height:1.5}
+#dict .src a{color:var(--muted)}
+#dict .msg{color:var(--muted);font-size:14px;line-height:1.5}
+#dict .hd{display:flex;align-items:baseline;gap:10px}
+#dict .hd button{border:none;padding:4px 6px;font-size:18px}
 #content a.xl{text-decoration:underline;text-underline-offset:2px}
 #backPill{position:fixed;left:50%;transform:translateX(-50%);bottom:max(46px,calc(env(safe-area-inset-bottom) + 40px));z-index:12;background:var(--fg);color:var(--bg);border:none;border-radius:999px;padding:9px 16px;font:500 13px Inter,system-ui,sans-serif;box-shadow:0 4px 18px #0003}
 #content p.small{font-size:.84em;line-height:1.45;margin:.3em 0}
@@ -122,7 +138,7 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
   <input id="file" type="file" accept="application/pdf,.pdf" class="hidden">
   <div id="books"></div>
   <p class="note">Tip: you can also drop a PDF anywhere on this page. Your books stay on this device, in this browser. Nothing is uploaded. Best results: text-based PDFs (not scans) with one or two columns. Figures show as a link to the original page.</p>
-  <p class="note" style="margin-top:8px">Version 20261109-2003</p>
+  <p class="note" style="margin-top:8px">Version 20261109-2008</p>
 </div>
 
 <div id="load" class="hidden"><div class="msg" id="loadMsg">Opening…</div><div class="pb"><i id="loadBar"></i></div></div>
@@ -153,9 +169,12 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
     <div class="row"><span>Spacing</span><div class="seg" data-k="lh"><button data-v="1.35">Tight</button><button data-v="1.55">Normal</button><button data-v="1.8">Loose</button></div></div>
     <div class="row"><span>Margins</span><div class="seg" data-k="margin"><button data-v="14">S</button><button data-v="24">M</button><button data-v="40">L</button></div></div>
     <div class="row"><span>Align</span><div class="seg" data-k="align"><button data-v="justify">Justify</button><button data-v="left">Left</button></div></div>
+    <div class="row"><span>Long-press</span><div class="seg" data-k="dict"><button data-v="app">Dictionary</button><button data-v="ios">Select text</button></div></div>
     <div class="row"><span>Page flash</span><div class="seg" data-k="flash"><button data-v="off">Off</button><button data-v="on">E-ink</button></div></div>
     <div class="row"><span>Theme</span><div class="seg" data-k="theme"><button class="sw" data-v="light" style="background:#fbfaf7"></button><button class="sw" data-v="sepia" style="background:#f4ecd8"></button><button class="sw" data-v="paper" title="E-ink paper" style="background:#e8e6df var(--grain)"></button><button class="sw" data-v="dark" style="background:#111"></button></div></div>
   </div>
+  <div id="dict" class="sheet hidden"><div id="dictBody"></div></div>
+  <div id="wordMark" class="hidden"></div>
   <div id="sToc" class="sheet hidden"><h3>Contents</h3><div id="tocList"></div></div>
 </div>
 
