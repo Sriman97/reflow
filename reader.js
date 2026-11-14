@@ -1,5 +1,5 @@
 /* ==CORE-START== : PDF → reflowable blocks */
-const CORE_VERSION = 15;
+const CORE_VERSION = 20;
 
 function median(a){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[b.length>>1]; }
 function pct(a,p){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[Math.min(b.length-1,Math.floor(p*b.length))]; }
@@ -20,6 +20,14 @@ async function extractPages(pdf, onProg){
       try{ const st=tc.styles&&tc.styles[fn]; if(st && /bold|black|heavy/i.test(st.fontFamily||'')) bo=true; }catch(e){}
       return boldOf[fn]=bo;
     };
+    const monoOf={};
+    const isMono = fn => {
+      if(fn in monoOf) return monoOf[fn];
+      let r=false;
+      try{ if(page.commonObjs.has(fn)){ const f=page.commonObjs.get(fn); r=/mono|courier|consol|menlo|inconsolata|typewriter|sourcecode|code|fixed|lettergothic|andale/i.test(f.name||''); } }catch(e){}
+      try{ const st=tc.styles&&tc.styles[fn]; if(st && /monospace/i.test(st.fontFamily||'')) r=true; }catch(e){}
+      return monoOf[fn]=r;
+    };
     const italOf={};
     const isItal = fn => {
       if(fn in italOf) return italOf[fn];
@@ -35,7 +43,7 @@ async function extractPages(pdf, onProg){
       if(Math.abs(b) > 0.05*Math.abs(a) || a<=0) continue;          // skip rotated text
       const size = Math.hypot(c,d) || it.height;
       if(size < 1) continue;
-      items.push({s:it.str, x:e-vx0, y:f-vy0, w:it.width, size, b:isBold(it.fontName), i:isItal(it.fontName)||Math.abs(c)>0.12*Math.abs(d)});
+      items.push({s:it.str, x:e-vx0, y:f-vy0, w:it.width, size, b:isBold(it.fontName), i:isItal(it.fontName)||Math.abs(c)>0.12*Math.abs(d), m:isMono(it.fontName)||undefined});
     }
     // Links (footnote references, cross-references, web links).
     const links=[];
@@ -130,6 +138,13 @@ function findFigures(ol, items, vx0, vy0, pw, ph){
     if(r.img) return w*h>2500 && !(edge && w*h<pw*ph*0.05);
     return !edge && r.n>=6 && w>40 && h>30;                              // a drawing has many strokes
   });
+  // A frame around paragraphs or a code listing is not a figure: it is mostly text.
+  rs=rs.filter(r=>{
+    let chars=0;
+    for(const it of items){ const cx=it.x+it.w/2, cy=it.y+it.size*0.35; if(cx>=r.x0&&cx<=r.x1&&cy>=r.y0&&cy<=r.y1) chars+=it.s.trim().length; }
+    const area=(r.x1-r.x0)*(r.y1-r.y0);
+    return chars < 260 && chars < area/90;
+  });
   if(!rs.length) return [];
   // Text inside the region, and small label text right next to it, belongs to the figure.
   const sizes=items.map(it=>it.size).sort((a,b)=>a-b); const bodyGuess=sizes[sizes.length>>1]||10;
@@ -175,11 +190,14 @@ function splitColumns(items, pw){
 
 // Inline style markers: \uE000/\uE001 italic, \uE002/\uE003 bold.
 // \uE006key\uE007 … \uE008 link, \uE009/\uE00A superscript, \uE00B/\uE00C subscript.
-const MARKS=/\uE006[^\uE007]*\uE007|[\uE000-\uE00C]/g;
-function collapseMarks(r){ return r.replace(/\uE001(\s*)\uE000/g,'$1').replace(/\uE003(\s*)\uE002/g,'$1').replace(/\uE000(\s*)\uE001/g,'$1').replace(/\uE002(\s*)\uE003/g,'$1').replace(/\uE00A\uE009/g,'').replace(/\uE00C\uE00B/g,''); }
+const MARKS=/\uE006[^\uE007]*\uE007|[\uE000-\uE00E]/g;
+function collapseMarks(r){ return r.replace(/\uE00E(\s*)\uE00D/g,'$1').replace(/\uE001(\s*)\uE000/g,'$1').replace(/\uE003(\s*)\uE002/g,'$1').replace(/\uE000(\s*)\uE001/g,'$1').replace(/\uE002(\s*)\uE003/g,'$1').replace(/\uE00A\uE009/g,'').replace(/\uE00C\uE00B/g,''); }
 
 // Group text items into lines (same baseline), left to right.
 function itemsToLines(items){
+  // Width of one monospace character (for code indentation).
+  const cws=items.filter(it=>it.m && it.s.length>=3 && it.w>0).map(it=>it.w/it.s.length);
+  const cw = median(cws) || 0;
   items = [...items].sort((a,b)=>(b.y-a.y)||(a.x-b.x));
   const lines=[];
   for(const it of items){
@@ -193,9 +211,20 @@ function itemsToLines(items){
   }
   for(const L of lines){
     L.items.sort((a,b)=>a.x-b.x);
-    let t='', raw='', lastX1=null, boldC=0, allC=0; const cnt={};
-    for(const it of L.items){ allC+=it.s.length; if(it.b) boldC+=it.s.length; }
+    let t='', raw='', lastX1=null, boldC=0, allC=0, monoC=0; const cnt={};
+    for(const it of L.items){ const n=it.s.trim().length; allC+=n; if(it.b) boldC+=n; if(it.m) monoC+=n; }
     L.bold = allC>0 && boldC/allC > 0.6;
+    L.mono = allC>0 && monoC/allC > 0.8;
+    if(L.mono){   // code: place each piece at its character column
+      const w = cw || (L.size*0.6); let code='', end=null;
+      for(const it of L.items){
+        const col=Math.max(0,Math.round((it.x-L.items[0].x)/w));
+        if(code.length<col) code+=' '.repeat(col-code.length);
+        else if(end!==null && it.x-end > w*0.5 && !/\s$/.test(code) && !/^\s/.test(it.s)) code+=' ';
+        code+=it.s; end=it.x+it.w;
+      }
+      L.code=code.replace(/\s+$/,''); L.cw=w;
+    }
     // Baseline and size of the main text of the line (for superscripts).
     const sz={}; for(const it of L.items){ const k=Math.round(it.size*2)/2; sz[k]=(sz[k]||0)+it.s.length; }
     const mainSize=+Object.entries(sz).sort((a,b)=>b[1]-a[1])[0][0];
@@ -210,6 +239,7 @@ function itemsToLines(items){
       }
       t+=it.s;
       let piece = it.i ? '\uE000'+it.s+'\uE001' : (it.b && !L.bold ? '\uE002'+it.s+'\uE003' : it.s);
+      if(it.m && !L.mono) piece='\uE00D'+piece+'\uE00E';
       const small = it.size < mainSize*0.92;
       if(small && it.y-baseY > mainSize*0.15) piece='\uE009'+piece+'\uE00A';
       else if(small && baseY-it.y > mainSize*0.1) piece='\uE00B'+piece+'\uE00C';
@@ -233,7 +263,7 @@ function buildBlocks(pages){
   const sizeCnt={};
   for(const pg of pages){
     const textItems = pg.items.filter(it=>!it.f);
-    pg.cols = splitColumns(textItems, pg.w).map(itemsToLines);
+    pg.cols = splitColumns(textItems, pg.w).map(itemsToLines).map(c=>c.filter(L=>!/^(\d*B\d{2,}){2,}\s*$/.test(L.text)));
     for(const c of pg.cols) for(const L of c) sizeCnt[L.size]=(sizeCnt[L.size]||0)+L.text.length;
   }
   const body = +((Object.entries(sizeCnt).sort((a,b)=>b[1]-a[1])[0]||[10])[0]);
@@ -247,12 +277,13 @@ function buildBlocks(pages){
     if(ls.length<4) return new Set(ls.filter(L=>/^#$/.test(norm(L.text))));
     return new Set([ls[0],ls[1],ls[ls.length-2],ls[ls.length-1]]);
   };
-  const edgeCnt={};
-  for(const pg of pages){ pg.edges=edgeLines(pg); const seen=new Set(); for(const L of pg.edges){ const n=norm(L.text); if(!seen.has(n)){ seen.add(n); edgeCnt[n]=(edgeCnt[n]||0)+1; } } }
+  const edgeCnt={}, prefCnt={};
+  const pref = t => norm(t).replace(/[^a-z#]/g,'').slice(0,14);   // running heads that change per section share a prefix
+  for(const pg of pages){ pg.edges=edgeLines(pg); const seen=new Set(); for(const L of pg.edges){ const n=norm(L.text); if(!seen.has(n)){ seen.add(n); edgeCnt[n]=(edgeCnt[n]||0)+1; } const q=pref(L.text); if(q.length>=10 && !seen.has('p:'+q)){ seen.add('p:'+q); prefCnt[q]=(prefCnt[q]||0)+1; } } }
   const thr=Math.max(3, pages.length*0.12);
   for(const pg of pages) for(const L of pg.edges){
     const n=norm(L.text);
-    if(edgeCnt[n]>=thr || (edgeCnt[n]>=3 && !near(L.size) && L.size<body) || /^(page )?#( of #)?$/.test(n) || (/^[ivxlc]+$/.test(n) && n.length<=5 && L.text.length<=5)) L.drop=true;
+    if(edgeCnt[n]>=thr || ((prefCnt[pref(L.text)]||0)>=4 && !L.bold && L.size<=body*1.05) || /^(\d*B\d{2,}){2,}\s*$/.test(L.text) || (edgeCnt[n]>=3 && !near(L.size) && L.size<body) || /^(page )?#( of #)?$/.test(n) || (/^[ivxlc]+$/.test(n) && n.length<=5 && L.text.length<=5)) L.drop=true;
   }
 
   // Typical line spacing (in units of body size).
@@ -266,6 +297,14 @@ function buildBlocks(pages){
   const blocks=[]; let cur=null; const pendingFigs=[];
   const terminal=/[.!?:"”’»)\]](\d{1,3}|[*†‡])?$/;   // allow a trailing footnote number
   const flush=()=>{
+    if(cur && cur.t==='pre'){   // lay out code lines with their indentation
+      const ls=cur.ls; while(ls.length && ls[ls.length-1]===null) ls.pop();
+      const real=ls.filter(Boolean), minX=Math.min(...real.map(l=>l.x)), cw=median(real.map(l=>l.cw))||6;
+      cur.text=ls.map(l=>l? ' '.repeat(Math.max(0,Math.round((l.x-minX)/cw)))+l.t : '').join('\n');
+      cur.box=cur.box.map(v=>Math.round(v)); delete cur.ls; delete cur.lh;
+      if(cur.text.trim()) blocks.push(cur);
+      cur=null;
+    }
     if(cur){
       const head = cur.t==='h1'||cur.t==='h2';
       const txt = head ? cur.text.trim() : collapseMarks(cur.raw||'').trim();
@@ -315,7 +354,9 @@ function buildBlocks(pages){
     const cols=pg.cols.map(c=>c.filter(L=>!L.drop));
     const firstL=(cols.find(c=>c.length)||[])[0];
     const sink = firstL ? (pg.h-firstL.y)/pg.h : 0;
-    const tocPage = cols.some(c=>c.some(L=>/^(table of )?contents$/i.test(L.text.trim())));
+    const allL=cols.flat();
+    const tocPage = cols.some(c=>c.some(L=>/^(table of )?contents$|^index$/i.test(L.text.trim())))
+      || (allL.length>=8 && allL.filter(L=>/\s(\d{1,4}|[ivxlc]{1,6})$/.test(L.text)).length > allL.length*0.6);   // lines ending in page numbers
     for(const ls of cols){
       if(!ls.length) continue;
       const bodyLs=ls.filter(L=>near(L.size));
@@ -332,6 +373,18 @@ function buildBlocks(pages){
         const gapB = prev ? (prev.y-L.y)/body : 99, gapA = nx ? (L.y-nx.y)/body : 99;
         const alone = gapB>lead*1.3 && gapA>lead*1.3;
         firstOfPage=false;
+        if(L.mono && !tocPage){
+          const contCode = cur && cur.t==='pre' && ((prev && gapB>=0 && (prev.y-L.y) < L.size*4) || (!prev && cur.page===pi-1));
+          if(!contCode){ flush(); cur={t:'pre', text:'x', page:pi, ls:[], box:[L.x0,L.y-L.size*0.3,L.x1,L.y+L.size]}; }
+          else if(prev && cur.page===pi){
+            const step=cur.lh||L.size*1.15, blanks=Math.round((prev.y-L.y)/step)-1;
+            for(let k=0;k<Math.min(blanks,2);k++) cur.ls.push(null);
+          }
+          if(prev && cur.page===pi && (prev.y-L.y) > 0 && (prev.y-L.y) < L.size*1.6) cur.lh=Math.min(cur.lh||99, prev.y-L.y);
+          cur.ls.push({x:L.x0, t:L.code, cw:L.cw});
+          if(cur.page===pi){ const b=cur.box; b[0]=Math.min(b[0],L.x0); b[1]=Math.min(b[1],L.y-L.size*0.3); b[2]=Math.max(b[2],L.x1); b[3]=Math.max(b[3],L.y+L.size); }
+          prev=L; continue;
+        }
         let kind=null;
         const standsOut = alone || (!prev && gapA>lead*1.2);
         if(tocPage) kind=null;
@@ -450,11 +503,12 @@ const content=$('content'), viewport=$('viewport');
 function showLoading(msg,frac){ $('load').classList.remove('hidden'); $('loadMsg').textContent=msg; $('loadBar').style.width=((frac||0)*100)+'%'; }
 function hideLoading(){ $('load').classList.add('hidden'); }
 function esc(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-// Text with inline markers -> safe HTML (italic, bold, sup, sub, links).
+// Text with inline markers -> safe HTML (italic, bold, code, sup, sub, links).
 function fmt(t){
-  let out='', it=0, bo=0, su=0, sb=0, ln=0;
-  const re=/([^]*)|[--]|[^-]+/g; let m;
-  const tog=(on,open,close)=>on?close:open;
+  let out='', it=0, bo=0, su=0, sb=0, ln=0, cd=0;
+  const re=/([^]*)|[--]|[^-]+/g; let m;
+  const TAG={'':['em',1],'':['em',0],'':['strong',1],'':['strong',0],'':['sup',1],'':['sup',0],'':['sub',1],'':['sub',0],'':['code',1],'':['code',0]};
+  const open={em:0,strong:0,sup:0,sub:0,code:0};
   while((m=re.exec(t))){
     const c=m[0];
     if(m[1]!==undefined){
@@ -465,21 +519,16 @@ function fmt(t){
       ln=1; continue;
     }
     if(c===''){ if(ln){ out+='</a>'; ln=0; } continue; }
-    if(c===''){ if(!it){ out+='<em>'; it=1; } continue; }
-    if(c===''){ if(it){ out+='</em>'; it=0; } continue; }
-    if(c===''){ if(!bo){ out+='<strong>'; bo=1; } continue; }
-    if(c===''){ if(bo){ out+='</strong>'; bo=0; } continue; }
-    if(c===''){ if(!su){ out+='<sup>'; su=1; } continue; }
-    if(c===''){ if(su){ out+='</sup>'; su=0; } continue; }
-    if(c===''){ if(!sb){ out+='<sub>'; sb=1; } continue; }
-    if(c===''){ if(sb){ out+='</sub>'; sb=0; } continue; }
-    if(c.length===1 && c>='' && c<='') continue;
+    const tg=TAG[c];
+    if(tg){ const [name,on]=tg; if(on && !open[name]){ out+=`<${name}>`; open[name]=1; } else if(!on && open[name]){ out+=`</${name}>`; open[name]=0; } continue; }
+    if(c.length===1 && c>='' && c<='') continue;
     out+=esc(c).replace(/\n/g,'<br>');
   }
-  if(sb) out+='</sub>'; if(su) out+='</sup>'; if(bo) out+='</strong>'; if(it) out+='</em>'; if(ln) out+='</a>';
+  for(const name of ['code','sub','sup','strong','em']) if(open[name]) out+=`</${name}>`;
+  if(ln) out+='</a>';
   return out;
 }
-const plain = t => (t||'').replace(/\uE006[^\uE007]*\uE007|[\uE000-\uE00C]/g,'');
+const plain = t => (t||'').replace(/\uE006[^\uE007]*\uE007|[\uE000-\uE00E]/g,'');
 
 /* ---------- library ---------- */
 async function renderLibrary(){
@@ -547,12 +596,16 @@ async function getToc(pdf,blocks){
   const outline=[]; let ol=null; try{ ol=await pdf.getOutline(); }catch(e){}
   async function walk(items,depth){
     for(const it of items||[]){
+      const t=(it.title||'').trim();
+      if(!t || /^[A-Za-z_]*\d{3,}$/.test(t)) continue;                  // generated anchor names
       try{ let d=it.dest; if(typeof d==='string') d=await pdf.getDestination(d);
         if(Array.isArray(d) && d[0]!=null){ const p = typeof d[0]==='object' ? await pdf.getPageIndex(d[0]) : d[0]; outline.push({title:it.title, depth, block:p2b(p)}); } }catch(e){}
-      if(depth<2) await walk(it.items, depth+1);
+      if(depth<2 && it.items && it.items.length<=150) await walk(it.items, depth+1);   // a node with hundreds of children is an index
     }
   }
   if(ol) await walk(ol,0);
+  // Entries that point into the printed contents pages at the front are noise.
+  for(let k=outline.length-1;k>=0;k--){ if(outline.filter(e=>e.block===outline[k].block).length>4 && outline[k].depth>0) outline.splice(k,1); }
   // Detected headings from the text.
   const h1=blocks.filter(b=>b.t==='h1').length, h2=blocks.filter(b=>b.t==='h2').length;
   const withH2 = !(h1>=3 && h2>h1*8);
@@ -561,7 +614,8 @@ async function getToc(pdf,blocks){
   // Use the PDF's own outline, and add detected chapters that it lacks.
   const outlineChapters = outline.filter(e=>e.depth===0).length;
   const detectedChapters = found.filter(e=>e.depth===0).length;
-  if(outline.length && (detectedChapters < 3 || outlineChapters >= detectedChapters*1.5)) return outline;
+  { const seen=new Set(); for(let k=0;k<outline.length;k++){ const key=outline[k].title.toLowerCase().replace(/[^a-z0-9]/g,''); if(seen.has(key)){ outline.splice(k,1); k--; } else seen.add(key); } }
+  if(outline.length>=20 || (outline.length && (detectedChapters < 3 || outlineChapters >= detectedChapters*1.5))) return outline;   // a rich outline wins
   const norm=t=>t.toLowerCase().replace(/[^a-z0-9]/g,'');
   const out=[...outline];
   for(const f of found){
@@ -621,6 +675,7 @@ function blockHTML(b,i){
   if(b.t==='chip') return `<div class="chip" data-i="${i}" data-p="${b.page}">▣ Figure on page ${b.page+1}. Tap to see the original page.</div>`;
   if(b.t==='li') return `<div class="li l${b.lvl||0}" data-i="${i}"><span class="mk">${b.mkl?`<a class="il" data-to="${esc(b.mkl.slice(2))}">${esc(b.mk)}</a>`:esc(b.mk)}</span><div class="lt">${fmt(b.text)}</div></div>`;
   if(b.t==='q') return `<p class="q l${b.lvl||1}" data-i="${i}">${fmt(b.text)}</p>`;
+  if(b.t==='pre') return `<pre class="code" data-i="${i}" data-p="${b.page}" data-box="${b.box?b.box.join(','):''}">${esc(b.text)}</pre>`;
   if(b.t==='c') return `<p class="c" data-i="${i}">${fmt(b.text)}</p>`;
   return `<p data-i="${i}" class="${b.ind?'':'ni'}${b.small?' small':''}">${fmt(b.text)}</p>`;
 }
@@ -890,6 +945,7 @@ stage.addEventListener('click',e=>{
   const xl=e.target.closest('a.xl'); if(xl) return;   // web link: let the browser open it
   const il=e.target.closest('a.il') || nearestLink(e.clientX,e.clientY,30);
   if(il){ e.preventDefault(); followLink(il.dataset.to, il); return; }
+  const pre=e.target.closest('pre.code'); if(pre && pre.dataset.box){ openOriginal(+pre.dataset.p, pre.dataset.box); return; }
   const fig=e.target.closest('.chip,.fig'); if(fig){ openOriginal(+fig.dataset.p, fig.dataset.box); return; }
   const x=e.clientX/window.innerWidth;
   if(x<0.3) prev(); else if(x>0.7) next(); else toggleBars();
