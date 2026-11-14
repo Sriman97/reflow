@@ -1,7 +1,7 @@
 """Production-like end-to-end test for Reflow.
 
 Runs the exact files that GitHub Pages serves, with the real PDF.js worker,
-in WebKit (the engine family of iPhone Safari). Covers: upload, library,
+in WebKit (the engine family of iPhone Safari). Covers: rendering every block in both layouts, upload, library,
 reopen, app reload, reopen from the saved copy, page turns, and the
 safe-mode retry when opening fails.
 
@@ -44,6 +44,14 @@ def main(url, books):
             n = drv.execute_script('return S.blocks.length')
             check('  has text blocks', n > 50, f'{n} blocks')
             for _ in range(3): drv.execute_script('next()'); time.sleep(0.15)
+            # Draw EVERY block, in both layouts: a crash anywhere in the book must fail the test.
+            r = drv.execute_script("""try{ let bad=0; S.blocks.forEach((b,i)=>{ try{ blockHTML(b,i); }catch(e){ bad++; if(!window.__first) window.__first=i+': '+e; } });
+              if(bad) return 'blockHTML failed on '+bad+' blocks, first '+window.__first;
+              for(let k=0;k<S.sec.length;k++) renderSection(k);
+              S.set.mode='scroll'; applySettings(); const n=content.querySelectorAll('[data-i]').length;
+              S.set.mode='pages'; applySettings();
+              return n===S.blocks.length ? 'ok' : 'scroll drew '+n+' of '+S.blocks.length; }catch(e){ return 'ERROR '+e+' @ '+(e.stack||'').split('\\n')[0]; }""")
+            check('  every block renders (pages + scroll)', r == 'ok', r)
             to_library()
         drv.execute_script("document.querySelector('.book').click()")
         check('reopen from library', wait() == 'open'); to_library()

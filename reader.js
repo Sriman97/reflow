@@ -28,7 +28,7 @@ async function extractPages(pdf, onProg, safe){
     const [vx0,vy0,vx1,vy1] = Array.from(page.view);
     let ol=null; if(!safe) try{ ol = await page.getOperatorList(); }catch(e){}   // also loads fonts (for bold detection)
     const tc = await page.getTextContent();
-    const boldOf={};
+    const boldOf=Object.create(null);
     const isBold = fn => {
       if(fn in boldOf) return boldOf[fn];
       let bo=false;
@@ -36,7 +36,7 @@ async function extractPages(pdf, onProg, safe){
       try{ const st=tc.styles&&tc.styles[fn]; if(st && /bold|black|heavy/i.test(st.fontFamily||'')) bo=true; }catch(e){}
       return boldOf[fn]=bo;
     };
-    const monoOf={};
+    const monoOf=Object.create(null);
     const isMono = fn => {
       if(fn in monoOf) return monoOf[fn];
       let r=false;
@@ -44,7 +44,7 @@ async function extractPages(pdf, onProg, safe){
       try{ const st=tc.styles&&tc.styles[fn]; if(st && /monospace/i.test(st.fontFamily||'')) r=true; }catch(e){}
       return monoOf[fn]=r;
     };
-    const italOf={};
+    const italOf=Object.create(null);
     const isItal = fn => {
       if(fn in italOf) return italOf[fn];
       let r=false;
@@ -299,7 +299,7 @@ function buildBlocks(pages){
     if(ls.length<4) return new Set(ls.filter(L=>/^#$/.test(norm(L.text))));
     return new Set([ls[0],ls[1],ls[ls.length-2],ls[ls.length-1]]);
   };
-  const edgeCnt={}, prefCnt={};
+  const edgeCnt=Object.create(null), prefCnt=Object.create(null);
   const pref = t => norm(t).replace(/[^a-z#]/g,'').slice(0,14);   // running heads that change per section share a prefix
   for(const pg of pages){ pg.edges=edgeLines(pg); const seen=new Set(); for(const L of pg.edges){ const n=norm(L.text); if(!seen.has(n)){ seen.add(n); edgeCnt[n]=(edgeCnt[n]||0)+1; } const q=pref(L.text); if(q.length>=10 && !seen.has('p:'+q)){ seen.add('p:'+q); prefCnt[q]=(prefCnt[q]||0)+1; } } }
   const thr=Math.max(3, pages.length*0.12);
@@ -529,7 +529,7 @@ function esc(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt
 function fmt(t){
   let out='', it=0, bo=0, su=0, sb=0, ln=0, cd=0;
   const re=/([^]*)|[--]|[^-]+/g; let m;
-  const TAG={'':['em',1],'':['em',0],'':['strong',1],'':['strong',0],'':['sup',1],'':['sup',0],'':['sub',1],'':['sub',0],'':['code',1],'':['code',0]};
+  const TAG=Object.assign(Object.create(null),{'':['em',1],'':['em',0],'':['strong',1],'':['strong',0],'':['sup',1],'':['sup',0],'':['sub',1],'':['sub',0],'':['code',1],'':['code',0]});
   const open={em:0,strong:0,sup:0,sub:0,code:0};
   while((m=re.exec(t))){
     const c=m[0];
@@ -541,7 +541,7 @@ function fmt(t){
       ln=1; continue;
     }
     if(c===''){ if(ln){ out+='</a>'; ln=0; } continue; }
-    const tg=TAG[c];
+    const tg = c.length===1 ? TAG[c] : undefined;   // text like "toString" must never hit a lookup table
     if(tg){ const [name,on]=tg; if(on && !open[name]){ out+=`<${name}>`; open[name]=1; } else if(!on && open[name]){ out+=`</${name}>`; open[name]=0; } continue; }
     if(c.length===1 && c>='' && c<='') continue;
     out+=esc(c).replace(/\n/g,'<br>');
@@ -853,7 +853,8 @@ function stems(w){
   if(w.includes('-')) c.push(...w.split('-'));
   return [...new Set(c)].filter(x=>x.length>1);
 }
-const dictCache=LS.get('reflow.dict',{});
+const dictCache=Object.assign(Object.create(null), LS.get('reflow.dict',{}));
+const hasOwn=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
 function cachePut(k,v){ dictCache[k]=v; const ks=Object.keys(dictCache); if(ks.length>400) delete dictCache[ks[0]]; LS.set('reflow.dict',dictCache); }
 async function freeDict(w){
   const r=await fetch('https://api.dictionaryapi.dev/api/v2/entries/en/'+encodeURIComponent(w));
@@ -878,7 +879,7 @@ async function wiktionary(w){
 async function define(word){
   const tries=stems(word); let netErr=false;
   for(const w of tries){
-    if(dictCache[w]!==undefined){ if(dictCache[w]) return dictCache[w]; continue; }
+    if(hasOwn(dictCache,w)){ if(dictCache[w]) return dictCache[w]; continue; }
     for(const src of [freeDict, wiktionary]){
       try{ const r=await src(w); if(r){ cachePut(w,r); return r; } }catch(e){ netErr=true; }
     }
