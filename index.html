@@ -13,6 +13,7 @@
 <meta name="apple-mobile-web-app-title" content="Reflow">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="debuglog.js"></script>
 <script src="pdf.min.js"></script>
 <style>
 :root{--grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .07 0'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)'/%3E%3C/svg%3E"),url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='m'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.012' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .3 0 0 0 0 .2 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='600' height='600' filter='url(%23m)'/%3E%3C/svg%3E");--bg:#fbfaf7;--fg:#1f1d1a;--muted:#8a857c;--ui:#ffffffef;--line:#00000014;--accent:#c2410c;--ff:'Literata',Georgia,serif;--fs:19px;--lh:1.55;--ta:justify}
@@ -132,6 +133,16 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
 #orig .obar span.l{flex:1;text-align:center;font-size:13px;color:var(--muted)}
 #oScroll{flex:1;overflow:auto;padding:8px;-webkit-overflow-scrolling:touch}
 #oCan{display:block;margin:0 auto;box-shadow:0 1px 8px #0002;background:#fff}
+#rScrim{position:fixed;inset:0;background:#0005;z-index:54}
+#sReport{z-index:55;max-height:85vh}
+#sReport .rsum{font-size:14px;margin:0 0 8px}
+#rLog{font:11px/1.45 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;background:var(--line);border-radius:8px;padding:8px;max-height:40vh;overflow:auto;margin:0 0 10px;-webkit-user-select:text;user-select:text}
+#sReport .rbtns{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
+#sReport .rchk{font:13px Inter,system-ui,sans-serif;display:flex;gap:6px;align-items:center;flex:1}
+#bReport{color:var(--accent);text-decoration:none}
+#errBadge{color:var(--accent);font-weight:600}
+#liveLog{position:fixed;left:6px;right:6px;bottom:6px;max-height:30vh;overflow:auto;z-index:70;background:#000c;color:#e5e5e5;font:10px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;border-radius:8px;padding:6px;pointer-events:none}
+#liveLog .error{color:#fca5a5}#liveLog .warn{color:#fde68a}
 </style>
 </head>
 <body>
@@ -143,7 +154,7 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
   <input id="file" type="file" accept="application/pdf,.pdf" class="hidden">
   <div id="books"></div>
   <p class="note">Tip: you can also drop a PDF anywhere on this page. Your books stay on this device, in this browser. Nothing is uploaded. Best results: text-based PDFs (not scans) with one or two columns. Figures show as a link to the original page.</p>
-  <p class="note" style="margin-top:8px">Version 20261114-0929</p>
+  <p class="note" style="margin-top:8px">Version <span id="ver"></span> · <a id="bReport" href="#">Report a problem</a> <span id="errBadge" class="hidden"></span></p>
 </div>
 
 <div id="load" class="hidden"><div class="msg" id="loadMsg">Opening…</div><div class="pb"><i id="loadBar"></i></div></div>
@@ -176,6 +187,7 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
     <div class="row"><span>Align</span><div class="seg" data-k="align"><button data-v="justify">Justify</button><button data-v="left">Left</button></div></div>
     <div class="row"><span>Long-press</span><div class="seg" data-k="dict"><button data-v="app">Dictionary</button><button data-v="ios">Select text</button></div></div>
     <div class="row"><span>Page flash</span><div class="seg" data-k="flash"><button data-v="off">Off</button><button data-v="on">E-ink</button></div></div>
+    <div class="row"><span>Problems</span><div class="seg"><button id="bReport2">Report a problem</button></div></div>
     <div class="row"><span>Theme</span><div class="seg" data-k="theme"><button class="sw" data-v="light" style="background:#fbfaf7"></button><button class="sw" data-v="sepia" style="background:#f4ecd8"></button><button class="sw" data-v="paper" title="E-ink paper" style="background:#e8e6df var(--grain)"></button><button class="sw" data-v="dark" style="background:#111"></button></div></div>
   </div>
   <div id="dict" class="sheet hidden"><div id="dictBody"></div></div>
@@ -184,6 +196,24 @@ body.sepia .fig canvas,body.sepia #oCan{filter:sepia(.3)}
 </div>
 
 <div id="flash"></div>
+<div id="rScrim" class="hidden"></div>
+<div id="sReport" class="sheet hidden">
+  <h3>Report a problem</h3>
+  <p class="rsum" id="rSum"></p>
+  <pre id="rLog"></pre>
+  <div class="rbtns">
+    <button id="rCopy" class="primary">Copy log</button>
+    <button id="rShare">Share…</button>
+    <button id="rIssue">Open a GitHub issue</button>
+  </div>
+  <div class="rbtns">
+    <label class="rchk"><input type="checkbox" id="rLive"> Show live log on screen</label>
+    <button id="rClear">Clear log</button>
+    <button id="rClose">Close</button>
+  </div>
+  <p class="note" style="margin-top:10px">This log stays on this device. Book titles are replaced by a short tag. Nothing is sent unless you copy, share or open an issue.</p>
+</div>
+<div id="liveLog" class="hidden"></div>
 <button id="backPill" class="hidden">‹ Back to where you were</button>
 <div id="orig" class="hidden">
   <div class="obar">

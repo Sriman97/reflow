@@ -26,7 +26,7 @@ async function extractPages(pdf, onProg, safe){
   const onePage = async (i)=>{
     const page = await pdf.getPage(i);
     const [vx0,vy0,vx1,vy1] = Array.from(page.view);
-    let ol=null; if(!safe) try{ ol = await page.getOperatorList(); }catch(e){}   // also loads fonts (for bold detection)
+    let ol=null; if(!safe) try{ ol = await page.getOperatorList(); }catch(e){ RLOG.warn('drawing ops p'+i, e); }   // also loads fonts (for bold detection)
     const tc = await page.getTextContent();
     const boldOf=Object.create(null);
     const isBold = fn => {
@@ -507,12 +507,13 @@ const DB={
       r.onupgradeneeded=()=>{ const d=r.result; ['books','meta','cache'].forEach(n=>d.createObjectStore(n,{keyPath:'id'})); };
       r.onsuccess=()=>{ this.db=r.result; res(this.db); }; r.onerror=()=>rej(r.error); }); },
   async run(store,mode,fn){ const db=await this.open(); return new Promise((res,rej)=>{ const t=db.transaction(store,mode); const req=fn(t.objectStore(store)); t.oncomplete=()=>res(req&&req.result); t.onerror=()=>rej(t.error); t.onabort=()=>rej(t.error); }); },
-  put(s,v){ return this.run(s,'readwrite',o=>o.put(v)).catch(()=>null); },
-  get(s,id){ return this.run(s,'readonly',o=>o.get(id)).catch(()=>null); },
-  all(s){ return this.run(s,'readonly',o=>o.getAll()).catch(()=>[]); },
-  del(s,id){ return this.run(s,'readwrite',o=>o.delete(id)).catch(()=>null); }
+  // Failures are logged, then the app carries on without storage (it still works for this visit).
+  put(s,v){ return this.run(s,'readwrite',o=>o.put(v)).catch(e=>{ RLOG.error('storage save '+s, e, {notify:s!=='cache'}); return null; }); },
+  get(s,id){ return this.run(s,'readonly',o=>o.get(id)).catch(e=>{ RLOG.error('storage read '+s, e); return null; }); },
+  all(s){ return this.run(s,'readonly',o=>o.getAll()).catch(e=>{ RLOG.error('storage list '+s, e, {notify:true}); return []; }); },
+  del(s,id){ return this.run(s,'readwrite',o=>o.delete(id)).catch(e=>{ RLOG.error('storage delete '+s, e); return null; }); }
 };
-const LS={ get(k,d){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch(e){ return d; } }, set(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} } };
+const LS={ get(k,d){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch(e){ return d; } }, set(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){ RLOG.warn('localStorage save '+k, e); } } };
 
 /* ---------- state ---------- */
 const $=id=>document.getElementById(id);
@@ -562,6 +563,7 @@ $('books').addEventListener('click', async e=>{
   if(del){ e.stopPropagation(); const id=del.dataset.del; await DB.del('books',id); await DB.del('meta',id); await DB.del('cache',id); renderLibrary(); return; }
   const b=e.target.closest('.book'); if(!b) return;
   const id=b.dataset.id;
+  RLOG.step('library: open '+RLOG.tag(id));
   showLoading('Opening…',0);
   try{
     const rec=await DB.get('books',id);
@@ -569,16 +571,20 @@ $('books').addEventListener('click', async e=>{
     let buf=null;
     if(rec && rec.data) buf=rec.data;
     else if(rec && rec.blob){ try{ buf=await rec.blob.arrayBuffer(); }catch(err){ buf=null; } }
-    if(!buf || !buf.byteLength){ alertBox('This browser did not keep the PDF file. Tap "Open a PDF" and pick it again. Your place in the book is kept.'); return; }
+    if(!buf || !buf.byteLength){ RLOG.error('library open', 'saved PDF missing for '+RLOG.tag(id)+' (record: '+(rec?Object.keys(rec).join(','):'none')+')'); alertBox('This browser did not keep the PDF file. Tap "Open a PDF" and pick it again. Your place in the book is kept.'); return; }
     openBook(id, m?m.name:'Book', buf);
-  }catch(err){ alertBox('Could not open this book: '+(err&&err.message||err)); }
+  }catch(err){ RLOG.error('library open', err); alertBox('Could not open this book: '+(err&&err.message||err)); }
 });
 $('file').addEventListener('change', async e=>{
   const f=e.target.files[0]; e.target.value=''; if(!f) return;
   const id=f.name+'|'+f.size;
+  RLOG.step(`picked ${RLOG.tag(id)} (${(f.size/1048576).toFixed(1)} MB, ${f.type||'no type'})`);
   showLoading('Opening '+f.name+'…',0);
-  const buf=await f.arrayBuffer();
-  await DB.put('books',{id, data:buf.slice(0)});
+  let buf;
+  try{ buf=await f.arrayBuffer(); }
+  catch(err){ RLOG.error('read picked file', err); return errorBox('Could not read this file: '+(err&&err.message||err), [errText(err,'read file')]); }   // used to leave the loading screen up forever
+  const saved=await DB.put('books',{id, data:buf.slice(0)});
+  if(saved==null) toast('This book could not be saved on this device, so you will need to pick it again next time.', RLOG.errors(Date.now()-5000).map(x=>RLOG.line(x)));
   const old=await DB.get('meta',id);
   openBook(id, old&&old.name || f.name.replace(/\.pdf$/i,''), buf);
 });
@@ -586,7 +592,9 @@ function alertBox(msg){ hideLoading(); const n=document.createElement('p'); n.cl
 
 /* ---------- open + extract ---------- */
 async function openBook(id,name,buf,safe){
-  let step='start';
+  let step='start'; const t0=Date.now(); let rebuilt=false;
+  if(!safe) EXTRACT_ERRORS.length=0;   // a cached book has no new problems; don't report the previous book's
+  RLOG.step(`open ${RLOG.tag(id)}${safe?' in safe mode':''}`);
   try{
     showLoading(safe?'Opening in safe mode…':'Opening…',0);
     step='load PDF';
@@ -595,7 +603,7 @@ async function openBook(id,name,buf,safe){
     let cache = safe ? null : await DB.get('cache',id);
     if(cache && (!Array.isArray(cache.blocks) || !Array.isArray(cache.toc))) cache=null;   // damaged cache: rebuild
     if(!cache || cache.v!==CORE_VERSION){
-      let last=0; step='extract';
+      let last=0; step='extract'; rebuilt=true;
       const pages = await extractPages(S.pdf, async (i,n)=>{ const now=Date.now(); if(now-last>80||i===n){ last=now; showLoading(`Rebuilding text… page ${i} of ${n}`, i/n); await new Promise(r=>setTimeout(r,0)); } }, safe);
       step='layout';
       showLoading('Laying out paragraphs…',1);
@@ -606,6 +614,8 @@ async function openBook(id,name,buf,safe){
       if(!safe) await DB.put('cache',cache);
     }
     step='show';
+    RLOG.step(`opened ${RLOG.tag(id)}: ${S.pdf.numPages} pages, ${cache.blocks.length} blocks, ${rebuilt?'rebuilt':'from cache'}, ${EXTRACT_ERRORS.length} page problems, ${Date.now()-t0} ms`);
+    for(const x of EXTRACT_ERRORS) RLOG.warn('extract', x);
     S.id=id; S.name=name; S.blocks=cache.blocks; S.toc=cache.toc;
     S.meta = (await DB.get('meta',id)) || {id,name,pos:0,pct:0};
     S.meta.opened=Date.now(); DB.put('meta',S.meta);
@@ -620,12 +630,13 @@ async function openBook(id,name,buf,safe){
     if(safe || EXTRACT_ERRORS.length) toast(safe ? 'Opened in safe mode: some formatting is off for this book.' : `${EXTRACT_ERRORS.length} page(s) used simple layout.`, [errText(window.__openErr,'first try')].concat(EXTRACT_ERRORS).filter(x=>!/undefined: undefined/.test(x)));
   }catch(err){
     console.error(err);
+    RLOG.error(`open ${RLOG.tag(id)} ${safe?'(safe mode) ':''}at step "${step}"`, err);
     if(!safe){ window.__openErr=err; window.__openErrStep=step; return openBook(id,name,buf,true); }   // second try without figures/links
     $('reader').classList.add('hidden'); $('lib').classList.remove('hidden');
     errorBox('Could not open this PDF: '+(err&&err.message||err), [errText(window.__openErr, 'first try at '+window.__openErrStep), errText(err,'safe mode at '+step)].concat(EXTRACT_ERRORS));
   }
 }
-function diag(lines){ return ['Reflow '+(document.querySelector('#lib .note:last-child')||{}).textContent, navigator.userAgent, ...lines].join('\n'); }
+function diag(lines){ return ['Reflow '+APP_VERSION+' (core '+CORE_VERSION+')', navigator.userAgent, ...lines].join('\n'); }
 function errorBox(msg, lines){
   hideLoading();
   const box=document.createElement('div'); box.className='note'; box.style.cssText='color:var(--accent);font-size:14px;margin:0 0 6px;border:1px solid var(--line);border-radius:10px;padding:10px';
@@ -754,7 +765,7 @@ async function drawFigs(){
       await page.render({canvasContext:cv.getContext('2d'), viewport:vp}).promise;
       if(tok!==figToken) return;
       el.innerHTML=''; el.appendChild(cv);
-    }catch(e){}
+    }catch(e){ if(e&&e.name!=='RenderingCancelledException') RLOG.warn('figure p'+(+el.dataset.p+1), e); }
   }
 }
 
@@ -881,7 +892,7 @@ async function define(word){
   for(const w of tries){
     if(hasOwn(dictCache,w)){ if(dictCache[w]) return dictCache[w]; continue; }
     for(const src of [freeDict, wiktionary]){
-      try{ const r=await src(w); if(r){ cachePut(w,r); return r; } }catch(e){ netErr=true; }
+      try{ const r=await src(w); if(r){ cachePut(w,r); return r; } }catch(e){ netErr=true; RLOG.warn('dictionary '+src.name, e); }
     }
     if(!netErr) cachePut(w,null);
   }
@@ -1018,14 +1029,14 @@ function hideBars(){ $('top').classList.add('off'); $('bot').classList.add('off'
 function openSheet(id){ $('scrim').classList.remove('hidden'); $(id).classList.remove('hidden'); }
 function closeSheets(){ $('scrim').classList.add('hidden'); $('sAa').classList.add('hidden'); $('sToc').classList.add('hidden'); $('dict').classList.add('hidden'); $('wordMark').classList.add('hidden'); }
 $('scrim').onclick=()=>{ if(Date.now()-lpFired<800) return; closeSheets(); };   // ignore the tap that ends a long press
-$('bLib').onclick=async()=>{ hideBars(); await saveNow(); $('reader').classList.add('hidden'); $('lib').classList.remove('hidden'); renderLibrary(); };
+$('bLib').onclick=async()=>{ RLOG.step('back to library'); hideBars(); await saveNow(); $('reader').classList.add('hidden'); $('lib').classList.remove('hidden'); renderLibrary(); };
 $('bAa').onclick=()=>openSheet('sAa');
 $('bToc').onclick=()=>{
   const cur=S.toc.reduce((acc,e,k)=>e.block<=S.pos?k:acc,-1);
   $('tocList').innerHTML = S.toc.length ? S.toc.map((e,k)=>`<a class="d${Math.min(2,e.depth)}${k===cur?' cur':''}" data-b="${e.block}">${esc(e.title)}</a>`).join('') : '<p class="note">No chapters found in this PDF.</p>';
   openSheet('sToc');
 };
-$('tocList').onclick=e=>{ const a=e.target.closest('a'); if(!a) return; closeSheets(); hideBars(); backStack.length=0; $('backPill').classList.add('hidden'); jump(+a.dataset.b); };
+$('tocList').onclick=e=>{ const a=e.target.closest('a'); if(!a) return; RLOG.step('contents: jump to block '+a.dataset.b); closeSheets(); hideBars(); backStack.length=0; $('backPill').classList.add('hidden'); jump(+a.dataset.b); };
 $('slider').addEventListener('change',e=>{
   const target=e.target.value/1000*S.total; let i=0; while(i<S.cum.length-1 && S.cum[i+1]<=target) i++; jump(i);
 });
@@ -1034,6 +1045,7 @@ $('sAa').addEventListener('click',e=>{
   if(b.dataset.a==='fs-') S.set.size=Math.max(13,S.set.size-1);
   else if(b.dataset.a==='fs+') S.set.size=Math.min(32,S.set.size+1);
   else { const g=b.closest('.seg'); if(!g||!g.dataset.k) return; S.set[g.dataset.k]=b.dataset.v; }
+  RLOG.step('setting '+(b.dataset.a||b.closest('.seg').dataset.k+'='+b.dataset.v));
   applySettings();
 });
 
@@ -1041,6 +1053,7 @@ $('sAa').addEventListener('click',e=>{
 const O={page:0, zoom:1, task:null};
 $('bOrig').onclick=()=>openOriginal((S.blocks[S.pos]||{page:0}).page);
 function openOriginal(p, box){
+  RLOG.step('original page '+(p+1)+(box?' (figure)':''));
   O.page=p; O.start=p; O.box = box ? box.split(',').map(Number) : null; O.zoom = O.box ? 1 : 1;
   $('orig').classList.remove('hidden'); renderOrig();
 }
@@ -1070,7 +1083,7 @@ async function renderOrig(){
     cv.style.width=Math.floor(vp.width/dpr)+'px'; cv.style.height=Math.floor(vp.height/dpr)+'px';
     O.task=page.render({canvasContext:cv.getContext('2d'), viewport:vp});
     await O.task.promise;
-  }catch(e){}
+  }catch(e){ if(e&&e.name!=='RenderingCancelledException') RLOG.error('original page '+(O.page+1), e, {notify:true}); }
 }
 $('oBack').onclick=closeOriginal;
 $('oPrev').onclick=()=>origGo(-1); $('oNext').onclick=()=>origGo(1);
@@ -1087,7 +1100,68 @@ document.addEventListener('drop',e=>{
   const dt=new DataTransfer(); dt.items.add(f); $('file').files=dt.files; $('file').dispatchEvent(new Event('change'));
 });
 
+/* ---------- report a problem ---------- */
+// Everything here stays on the device until the reader copies or shares it. See debuglog.js.
+function reportText(){
+  const st=S.blocks.length ? `reading ${RLOG.tag(S.id)}: block ${S.pos} of ${S.blocks.length}, section ${S.si+1}/${S.sec.length}, page ${S.page+1}/${S.pages}, ${S.set.mode}` : 'in library';
+  const disp=(window.matchMedia&&matchMedia('(display-mode: standalone)').matches)||navigator.standalone ? 'home screen app' : 'browser tab';
+  return ['Reflow '+APP_VERSION+' (core '+CORE_VERSION+')', navigator.userAgent,
+    `${disp}, ${navigator.onLine===false?'offline':'online'}, screen ${innerWidth}x${innerHeight}@${window.devicePixelRatio||1}, service worker ${navigator.serviceWorker&&navigator.serviceWorker.controller?'active':'none'}`,
+    st, 'settings '+JSON.stringify(S.set), '', '--- log (oldest first) ---', RLOG.text()||'(empty)'].join('\n');
+}
+let reportSeen=+(LS.get('reflow.reportSeen',0))||0;
+function updateErrBadge(){ const n=RLOG.errors(reportSeen).length; const b=$('errBadge'); b.textContent=n?`(${n} new error${n>1?'s':''})`:''; b.classList.toggle('hidden',!n); }
+function openReport(){
+  const errs=RLOG.errors(), recent=RLOG.errors(Date.now()-864e5);
+  $('rSum').textContent = errs.length ? `${errs.length} error${errs.length>1?'s':''} logged, ${recent.length} in the last day. Copy or share this with whoever is fixing Reflow.` : 'No errors logged. If something looked wrong, copy this anyway: the steps help show what happened.';
+  $('rLog').textContent=reportText(); $('rLive').checked=RDEBUG.on;
+  $('rShare').classList.toggle('hidden', !navigator.share);
+  $('rScrim').classList.remove('hidden'); $('sReport').classList.remove('hidden');
+  setTimeout(()=>{ const l=$('rLog'); l.scrollTop=l.scrollHeight; },0);
+  reportSeen=Date.now(); LS.set('reflow.reportSeen',reportSeen); updateErrBadge();
+}
+function closeReport(){ $('rScrim').classList.add('hidden'); $('sReport').classList.add('hidden'); }
+async function copyText(txt, btn, label){ try{ await navigator.clipboard.writeText(txt); btn.textContent='Copied'; }catch(_){ const r=document.createRange(); r.selectNodeContents($('rLog')); const sel=getSelection(); sel.removeAllRanges(); sel.addRange(r); btn.textContent='Selected: copy it'; } setTimeout(()=>btn.textContent=label,2500); }
+$('bReport').onclick=e=>{ e.preventDefault(); openReport(); };
+$('bReport2').onclick=()=>{ closeSheets(); openReport(); };
+$('rScrim').onclick=closeReport; $('rClose').onclick=closeReport;
+$('rCopy').onclick=e=>copyText(reportText(), e.target, 'Copy log');
+$('rShare').onclick=()=>{ navigator.share({title:'Reflow problem report', text:reportText()}).catch(()=>{}); };
+$('rIssue').onclick=e=>{
+  // GitHub pre-fills the issue from the link. Long logs are cut to the newest part; the full log is also copied.
+  const full=reportText(); let body=full; const max=5500;
+  if(body.length>max){ const head=body.slice(0,body.indexOf('--- log')); body=head+'--- log (newest part; full log is on the clipboard) ---\n…'+full.slice(-(max-head.length)); }
+  try{ navigator.clipboard.writeText(full).catch(()=>{}); }catch(_){}
+  const last=RLOG.errors().pop();
+  const title='Problem: '+(last? last.m.slice(0,80) : 'describe what went wrong');
+  window.open('https://github.com/Sriman97/reflow/issues/new?title='+encodeURIComponent(title)+'&body='+encodeURIComponent('**What happened:**\n\n\n**Log:**\n```\n'+body+'\n```'), '_blank');
+};
+$('rClear').onclick=()=>{ RLOG.clear(); RLOG.step('log cleared'); $('rLog').textContent=reportText(); updateErrBadge(); };
+$('rLive').onchange=e=>{ RDEBUG.set(e.target.checked); RDEBUG.on=e.target.checked; liveLog(); };
+function liveLog(){
+  const el=$('liveLog'); el.classList.toggle('hidden', !RDEBUG.on); if(!RDEBUG.on) return;
+  el.innerHTML=RLOG.entries().slice(-30).map(x=>`<div class="${x.k}">${esc(RLOG.line(x))}</div>`).join(''); el.scrollTop=el.scrollHeight;
+}
+// A visible sign when something breaks, at most once a minute, so errors are not missed but don't nag.
+let lastNotice=0;
+RLOG.onAdd((e,o)=>{
+  if(RDEBUG.on) liveLog();
+  if(e.k!=='error') return;
+  updateErrBadge();
+  if(o.notify && Date.now()-lastNotice>60000){ lastNotice=Date.now(); noticeError(e); }
+});
+function noticeError(e){
+  const t=document.createElement('div');
+  t.style.cssText='position:fixed;left:12px;right:12px;bottom:max(12px,env(safe-area-inset-bottom));z-index:60;background:var(--fg);color:var(--bg);border-radius:12px;padding:10px 12px;font:13px/1.4 Inter,system-ui,sans-serif;display:flex;gap:10px;align-items:center;box-shadow:0 6px 24px #0004';
+  t.innerHTML=`<span style="flex:1">Something went wrong. It was saved to the problem log.</span><button style="color:var(--bg);border-color:#fff4">Details</button><button style="color:var(--bg);border:none">✕</button>`;
+  const [d,x]=t.querySelectorAll('button');
+  d.onclick=()=>{ t.remove(); openReport(); }; x.onclick=()=>t.remove();
+  document.body.appendChild(t); setTimeout(()=>t.remove(),12000);
+}
+
 /* ---------- boot ---------- */
+$('ver').textContent=APP_VERSION;
+updateErrBadge(); liveLog();
 applySettings(false);
 renderLibrary();
-if(!window.pdfjsLib){ alertBox('The PDF engine did not load. Check your connection and reload.'); }
+if(!window.pdfjsLib){ RLOG.error('boot', 'PDF.js did not load'); alertBox('The PDF engine did not load. Check your connection and reload.'); }

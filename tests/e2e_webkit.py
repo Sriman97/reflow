@@ -36,7 +36,7 @@ def main(url, books):
         drv.execute_script("document.getElementById('bLib').click()"); time.sleep(0.8)
     try:
         drv.set_window_size(390, 844)
-        drv.get(url); time.sleep(2); drv.execute_script(HOOK)
+        drv.get(url); time.sleep(2); drv.execute_script(HOOK); drv.execute_script('RLOG.clear()')
         check('engine is WebKit', 'AppleWebKit' in drv.execute_script('return navigator.userAgent'))
         for f in books:
             drv.find_element(By.ID, 'file').send_keys(f)
@@ -68,6 +68,8 @@ def main(url, books):
         check('opens in safe mode after a failure', wait() == 'open')
         check('  shows a notice with details', drv.execute_script("return [...document.querySelectorAll('div')].some(d=>/safe mode/.test(d.textContent) && d.querySelector('button'))"))
         errs = [e for e in drv.execute_script('return window.__errs||[]') if 'is not iterable' not in e and 'ERR_' not in e]
+        # The app's own problem log (debuglog.js) also sees errors the hook above can't, such as failed storage saves.
+        errs += [e for e in drv.execute_script("return RLOG.errors().map(e=>e.m)") if 'is not iterable' not in e]
         check('no unexpected errors', not errs, ' | '.join(errs)[:600])
     finally:
         drv.quit()
