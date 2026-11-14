@@ -23,3 +23,6 @@ Reflow rebuilds paragraphs, headings and chapters from a PDF, so you can change 
 - `index.html`, `reader.js` — the app
 - `pdf.min.js`, `pdf.worker.min.js` — [PDF.js](https://mozilla.github.io/pdf.js/) 3.11.174 (Apache-2.0)
 - `sw.js`, `manifest.webmanifest`, `register-sw.js` — offline + install
+
+## Testing
+`tests/e2e_webkit.py` runs the exact files GitHub Pages serves, with the real PDF.js worker, in WebKit (the engine family of iPhone Safari): upload, library, reopen, reload, reopen from the saved copy, and the safe-mode retry. See the file header for setup. Book PDFs are not stored in the repo.

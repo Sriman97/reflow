@@ -1,16 +1,32 @@
 /* ==CORE-START== : PDF → reflowable blocks */
-const CORE_VERSION = 20;
+const CORE_VERSION = 21;
 
 function median(a){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[b.length>>1]; }
 function pct(a,p){ if(!a.length) return 0; const b=[...a].sort((x,y)=>x-y); return b[Math.min(b.length-1,Math.floor(p*b.length))]; }
 
 // Read text positions and figure hints from every page.
-async function extractPages(pdf, onProg){
+// safe=true skips the drawing operators and links (used if a page fails on this device).
+const EXTRACT_ERRORS=[];
+const errText = (e,where) => `${where}: ${e&&e.name||'Error'}: ${e&&e.message||e}` + (e&&e.stack ? ' @ '+String(e.stack).split('\n').slice(0,4).join(' / ') : '');
+async function plainPage(pdf,i){   // fallback: text only, no styles, figures or links
+  const page=await pdf.getPage(i); const v=Array.from(page.view||[0,0,612,792]);
+  const tc=await page.getTextContent(); const items=[];
+  for(const it of tc.items||[]){
+    if(!it.str || !it.str.trim()) continue;
+    const t=Array.from(it.transform||[]); if(t.length<6) continue;
+    const size=Math.hypot(t[2],t[3])||it.height||10;
+    items.push({s:it.str, x:t[4]-v[0], y:t[5]-v[1], w:it.width||0, size});
+  }
+  page.cleanup();
+  return {w:v[2]-v[0], h:v[3]-v[1], items, fig:false, figs:[]};
+}
+async function extractPages(pdf, onProg, safe){
   const OPS = pdfjsLib.OPS, pages=[];
-  for(let i=1;i<=pdf.numPages;i++){
+  EXTRACT_ERRORS.length=0;
+  const onePage = async (i)=>{
     const page = await pdf.getPage(i);
-    const [vx0,vy0,vx1,vy1] = page.view;
-    let ol=null; try{ ol = await page.getOperatorList(); }catch(e){}   // also loads fonts (for bold detection)
+    const [vx0,vy0,vx1,vy1] = Array.from(page.view);
+    let ol=null; if(!safe) try{ ol = await page.getOperatorList(); }catch(e){}   // also loads fonts (for bold detection)
     const tc = await page.getTextContent();
     const boldOf={};
     const isBold = fn => {
@@ -39,7 +55,8 @@ async function extractPages(pdf, onProg){
     const items=[];
     for(const it of tc.items){
       if(!it.str || !it.str.trim()) continue;
-      const [a,b,c,d,e,f] = it.transform;
+      const [a,b,c,d,e,f] = Array.from(it.transform||[]);
+      if(f===undefined) continue;
       if(Math.abs(b) > 0.05*Math.abs(a) || a<=0) continue;          // skip rotated text
       const size = Math.hypot(c,d) || it.height;
       if(size < 1) continue;
@@ -48,7 +65,7 @@ async function extractPages(pdf, onProg){
     // Links (footnote references, cross-references, web links).
     const links=[];
     try{
-      const an=await page.getAnnotations({intent:'display'});
+      const an = safe ? [] : await page.getAnnotations({intent:'display'});
       for(const a of an){
         if(a.subtype!=='Link' || !a.rect) continue;
         let key=null;
@@ -87,9 +104,14 @@ async function extractPages(pdf, onProg){
       }
       if(paths > 150) fig=true;
     }catch(e){}
-    const figs = ol ? findFigures(ol, items, vx0, vy0, vx1-vx0, vy1-vy0) : [];
-    pages.push({w:vx1-vx0, h:vy1-vy0, items, fig, figs});
+    let figs=[];
+    if(ol) try{ figs=findFigures(ol, items, vx0, vy0, vx1-vx0, vy1-vy0); }catch(e){ for(const it of items) delete it.f; EXTRACT_ERRORS.push(errText(e,'figures p'+i)); }
     page.cleanup();
+    return {w:vx1-vx0, h:vy1-vy0, items, fig, figs};
+  };
+  for(let i=1;i<=pdf.numPages;i++){
+    try{ pages.push(await onePage(i)); }
+    catch(e){ EXTRACT_ERRORS.push(errText(e,'page '+i)); try{ pages.push(await plainPage(pdf,i)); }catch(e2){ pages.push({w:612,h:792,items:[],fig:false,figs:[]}); } }
     if(onProg) await onProg(i, pdf.numPages);
   }
   return pages;
@@ -563,19 +585,27 @@ $('file').addEventListener('change', async e=>{
 function alertBox(msg){ hideLoading(); const n=document.createElement('p'); n.className='note'; n.style.cssText='color:var(--accent);font-size:14px;margin:0 0 4px'; n.textContent=msg; $('books').prepend(n); setTimeout(()=>n.remove(),9000); }
 
 /* ---------- open + extract ---------- */
-async function openBook(id,name,buf){
+async function openBook(id,name,buf,safe){
+  let step='start';
   try{
-    showLoading('Opening…',0);
-    S.pdf = await pdfjsLib.getDocument({data:new Uint8Array(buf), isEvalSupported:false}).promise;
-    let cache=await DB.get('cache',id);
+    showLoading(safe?'Opening in safe mode…':'Opening…',0);
+    step='load PDF';
+    S.pdf = await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0)), isEvalSupported:false}).promise;
+    step='read cache';
+    let cache = safe ? null : await DB.get('cache',id);
+    if(cache && (!Array.isArray(cache.blocks) || !Array.isArray(cache.toc))) cache=null;   // damaged cache: rebuild
     if(!cache || cache.v!==CORE_VERSION){
-      let last=0;
-      const pages = await extractPages(S.pdf, async (i,n)=>{ const now=Date.now(); if(now-last>80||i===n){ last=now; showLoading(`Rebuilding text… page ${i} of ${n}`, i/n); await new Promise(r=>setTimeout(r,0)); } });
+      let last=0; step='extract';
+      const pages = await extractPages(S.pdf, async (i,n)=>{ const now=Date.now(); if(now-last>80||i===n){ last=now; showLoading(`Rebuilding text… page ${i} of ${n}`, i/n); await new Promise(r=>setTimeout(r,0)); } }, safe);
+      step='layout';
       showLoading('Laying out paragraphs…',1);
       const r=buildBlocks(pages);
-      cache={id, v:CORE_VERSION, blocks:r.blocks, toc:await getToc(S.pdf,r.blocks)};
-      await DB.put('cache',cache);
+      step='contents';
+      let toc=[]; try{ toc=await getToc(S.pdf,r.blocks); }catch(e){ EXTRACT_ERRORS.push(errText(e,'contents')); }
+      cache={id, v:CORE_VERSION, blocks:r.blocks, toc};
+      if(!safe) await DB.put('cache',cache);
     }
+    step='show';
     S.id=id; S.name=name; S.blocks=cache.blocks; S.toc=cache.toc;
     S.meta = (await DB.get('meta',id)) || {id,name,pos:0,pct:0};
     S.meta.opened=Date.now(); DB.put('meta',S.meta);
@@ -587,7 +617,31 @@ async function openBook(id,name,buf){
     applySettings(false);
     if(!S.blocks.length){ content.innerHTML=''; openOriginal(0); return; }
     const b0=Math.min(S.meta.pos||0, S.blocks.length-1); show(b0, S.meta.off||0);
-  }catch(err){ console.error(err); alertBox('Could not open this PDF: '+(err&&err.message||err)); $('reader').classList.add('hidden'); $('lib').classList.remove('hidden'); }
+    if(safe || EXTRACT_ERRORS.length) toast(safe ? 'Opened in safe mode: some formatting is off for this book.' : `${EXTRACT_ERRORS.length} page(s) used simple layout.`, [errText(window.__openErr,'first try')].concat(EXTRACT_ERRORS).filter(x=>!/undefined: undefined/.test(x)));
+  }catch(err){
+    console.error(err);
+    if(!safe){ window.__openErr=err; window.__openErrStep=step; return openBook(id,name,buf,true); }   // second try without figures/links
+    $('reader').classList.add('hidden'); $('lib').classList.remove('hidden');
+    errorBox('Could not open this PDF: '+(err&&err.message||err), [errText(window.__openErr, 'first try at '+window.__openErrStep), errText(err,'safe mode at '+step)].concat(EXTRACT_ERRORS));
+  }
+}
+function diag(lines){ return ['Reflow '+(document.querySelector('#lib .note:last-child')||{}).textContent, navigator.userAgent, ...lines].join('\n'); }
+function errorBox(msg, lines){
+  hideLoading();
+  const box=document.createElement('div'); box.className='note'; box.style.cssText='color:var(--accent);font-size:14px;margin:0 0 6px;border:1px solid var(--line);border-radius:10px;padding:10px';
+  box.innerHTML=`<div>${esc(msg)}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="cp">Copy details</button><button class="x">Dismiss</button></div>`;
+  const txt=diag(lines);
+  box.querySelector('.cp').onclick=async e=>{ e.stopPropagation(); try{ await navigator.clipboard.writeText(txt); e.target.textContent='Copied'; }catch(_){ e.target.textContent='Copy failed'; } };
+  box.querySelector('.x').onclick=e=>{ e.stopPropagation(); box.remove(); };
+  $('books').prepend(box);
+}
+function toast(msg, lines){
+  const t=document.createElement('div');
+  t.style.cssText='position:fixed;left:12px;right:12px;top:max(12px,env(safe-area-inset-top));z-index:60;background:var(--fg);color:var(--bg);border-radius:12px;padding:10px 12px;font:13px/1.4 Inter,system-ui,sans-serif;display:flex;gap:10px;align-items:center;box-shadow:0 6px 24px #0004';
+  t.innerHTML=`<span style="flex:1">${esc(msg)}</span><button style="color:var(--bg);border-color:#fff4">Copy details</button><button style="color:var(--bg);border:none">✕</button>`;
+  const [cp,x]=t.querySelectorAll('button'); const txt=diag(lines||[]);
+  cp.onclick=async()=>{ try{ await navigator.clipboard.writeText(txt); cp.textContent='Copied'; }catch(_){ cp.textContent='Copy failed'; } };
+  x.onclick=()=>t.remove(); document.body.appendChild(t); setTimeout(()=>t.remove(),15000);
 }
 
 async function getToc(pdf,blocks){
